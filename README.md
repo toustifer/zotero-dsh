@@ -13,6 +13,10 @@
 | `packages/zotero-addon` | Zotero → DSH | 在 Zotero 右侧栏里嵌入真正的 DSH 界面 |
 | `packages/dsh-plugin` | DSH → Zotero | 在 DSH 里检索、精读、标注、整理论文 |
 
+**不想编译？** 两步装完：[下载 xpi 装进 Zotero] + [跑一次安装脚本]，
+都从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 取预构建产物。
+详见 [install/README.md](install/README.md)。
+
 ---
 
 ## Zotero 里的 DSH — `packages/zotero-addon`
@@ -32,24 +36,17 @@ Zotero 7 插件。在条目详情面板的右侧栏注册一个 section，里面
 
 ### 安装
 
-1. 先让一个 DSH Web 实例跑起来，比如：
-   ```
-   dsh web
-   ```
-   启动行会打印 `dsh web: http://127.0.0.1:3080/?token=<...>`
+从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载 `zotero-dsh.xpi`，
+Zotero 里走 **工具 → 插件 → 齿轮 → Install Plugin From File…**，重启即可 —— 不需要先跑
+"Load Plugin From Manifest" 那套开发流程。
 
-2. Zotero → 工具 → 开发者 → **Load Plugin From Manifest…**，选
-   `packages/zotero-addon/addon/manifest.json`
-
-3. 重启 Zotero，点开任意条目的右侧栏里的 DSH 图标
-
-### 打包
+### 自己打包
 
 ```powershell
 pwsh -File packages/zotero-addon/build.ps1
 ```
 
-产出 `packages/zotero-addon/zotero-dsh.xpi`，可直接拖进 Zotero 安装。
+产出 `packages/zotero-addon/zotero-dsh.xpi`。
 
 ---
 
@@ -67,19 +64,18 @@ DSH 插件（`@dsh-external/dsh-zotero`）。注册 12 个 agent 工具和一个
 
 ### 安装
 
-还没发到 npm，从源码装：
+从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载 `install-dsh.ps1`
+和 `dsh-zotero-0.1.1.tgz`，放同一个目录，然后：
 
-```bash
-git clone https://github.com/toustifer/zotero-dsh
-cd zotero-dsh/packages/dsh-plugin
-pnpm install && node scripts/build.mjs
+```powershell
+pwsh -File install-dsh.ps1
 ```
 
-然后把 `packages/dsh-plugin` 链到 DSH profile 的
-`node_modules/@dsh-external/dsh-zotero`，并在 profile 的 `cordis.patch.yml`
-里插入包名锚点 —— 具体写法见包内 `cordis.patch.yml` 的注释。
+脚本只做三件事：解包到 `~/.dsh/plugins/dsh-zotero`、在 profile 的 `node_modules`
+下建 junction、往 `cordis.patch.yml` 补一次加载锚点。**不编译。** 细节见
+[install/README.md](install/README.md)。
 
-### 构建
+### 自己构建
 
 ```bash
 cd packages/dsh-plugin

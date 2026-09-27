@@ -5,8 +5,9 @@ dist/
 *.tsbuildinfo
 *.tgz
 
-# zotero addon build
+# build artifacts shipped via GitHub Releases, not committed
 *.xpi
+install/*.tgz
 
 # local tooling
 .agentflow-worktrees/

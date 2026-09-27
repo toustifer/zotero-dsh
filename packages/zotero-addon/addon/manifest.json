@@ -4,11 +4,11 @@
   "version": "0.17.0",
   "description": "在 Zotero 中嵌入 DeepSeek Harness 对话面板",
   "author": "Fisfzy",
-  "homepage_url": "https://github.com/Fisfzy/zotero-dsh",
+  "homepage_url": "https://github.com/toustifer/zotero-dsh",
   "applications": {
     "zotero": {
       "id": "zotero-dsh@fisfzy.local",
-      "update_url": "https://raw.githubusercontent.com/Fisfzy/zotero-dsh/main/updates.json",
+      "update_url": "https://raw.githubusercontent.com/toustifer/zotero-dsh/main/packages/zotero-addon/updates.json",
       "strict_min_version": "6.999",
       "strict_max_version": "9999.*"
     }
