@@ -72,7 +72,9 @@ Say "linked $link"
 $patch  = Join-Path $profileDir 'cordis.patch.yml'
 $anchor = '@dsh-external/dsh-zotero'
 if (-not (Test-Path $patch)) {
-  Set-Content -Path $patch -Encoding UTF8 -Value ('# Your patch layer for this dsh profile.' + $nl + '[]' + $nl)
+  # No file yet: the appended block below becomes the whole list (no "[]" seed,
+  # which would leave the file with two top-level arrays).
+  Set-Content -Path $patch -Encoding UTF8 -Value ('# Your patch layer for this dsh profile.' + $nl)
 }
 $existing = Get-Content $patch -Raw
 if ($existing -match [regex]::Escape($anchor)) {
