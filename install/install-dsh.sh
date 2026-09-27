@@ -75,6 +75,30 @@ if [ ! -d "$TARGET/node_modules/pdfjs-dist" ]; then
   fi
 fi
 
+# ---- 2b. resolve peer dependencies -------------------------------------------
+# 宿主代码 import @deepseek-ai/dsh-tools / dsh-llm / schemastery 和 cordis。
+# 这些是 peer，tarball 里没有 —— 但 DSH 自己的 profiles 作用域里全都有，链过去即可，
+# 否则启动时会 ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-tools'。
+SHARED="$DSH_HOME/profiles/node_modules"
+if [ -d "$SHARED/@deepseek-ai" ]; then
+  mkdir -p "$TARGET/node_modules/@deepseek-ai"
+  linked_peers=0
+  for p in dsh-tools dsh-llm dsh-client-ui-slots schemastery dsh-system-prompt dsh-session; do
+    if [ -d "$SHARED/@deepseek-ai/$p" ]; then
+      ln -sfn "$SHARED/@deepseek-ai/$p" "$TARGET/node_modules/@deepseek-ai/$p"
+      linked_peers=$((linked_peers + 1))
+    fi
+  done
+  # cordis 在作用域里叫 @deepseek-ai/cordis，但插件 import 的是裸名
+  if [ -d "$SHARED/@deepseek-ai/cordis" ]; then
+    ln -sfn "$SHARED/@deepseek-ai/cordis" "$TARGET/node_modules/cordis"
+    ln -sfn "$SHARED/@deepseek-ai/cordis" "$TARGET/node_modules/@deepseek-ai/cordis"
+  fi
+  say "linked $linked_peers peer packages from $SHARED"
+else
+  say "WARNING: $SHARED/@deepseek-ai not found — start DSH once so it can install its own scope, then re-run"
+fi
+
 # ---- 3. link into the profile ----------------------------------------------
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 [ -d "$PROFILE_DIR" ] || die "profile '$PROFILE' not found at $PROFILE_DIR — start DSH once for that profile, or pass --profile <name>"
