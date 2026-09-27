@@ -1516,13 +1516,32 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
   const page = String(body.page ?? '').trim()
   const ask = body.ask === true
 
-  const store = readChatStore()
+  let store = readChatStore()
   const mine = store.conversations
     .filter((c) => c.kind === 'paper' && c.itemKey === itemKey)
     .sort((a, b) => (b.seq || 1) - (a.seq || 1))
-  const conv = mine[0]
-  const sessionId = conv?.sessionId ?? `zotero-paper-${itemKey}`
+  let conv: ChatConv | undefined = mine[0]
+  let opened = false
 
+  // 懒开：从没打开过这篇论文的会话时补一条记录，否则 DSH 面板的 History 里
+  // 根本找不到它 —— 选段进去了用户也无从查看。
+  if (!conv) {
+    const seq = maxPaperSeq(store, itemKey) + 1
+    conv = {
+      kind: 'paper',
+      itemKey,
+      title: String(body.title ?? '').trim() || itemKey,
+      sessionId: seq === 1 ? `zotero-paper-${itemKey}` : `zotero-paper-${itemKey}-${seq}`,
+      seq,
+      injectedAt: 0,
+      at: Date.now(),
+    }
+    writeChatStore({ conversations: [...store.conversations, conv] })
+    store = readChatStore()
+    opened = true
+  }
+
+  const sessionId = conv.sessionId
   let agent: AgentLike
   try {
     agent = await ensureLiveAgent(deps, sessionId, undefined)
@@ -1567,8 +1586,8 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
     try { followupText(agent, QUOTE_ASK_PROMPT); followup = true } catch { followup = false }
   }
 
-  console.log(`[dsh-zotero] quote itemKey=${itemKey} page=${page || '-'} chars=${text.length} ask=${ask} session=${sessionId} opened=${!conv}`)
-  return { ok: true, sessionId, chars: text.length, page: page || undefined, followup, opened: !conv }
+  console.log(`[dsh-zotero] quote itemKey=${itemKey} page=${page || '-'} chars=${text.length} ask=${ask} session=${sessionId} opened=${opened}`)
+  return { ok: true, sessionId, chars: text.length, page: page || undefined, followup, opened }
 }
 
 async function injectContext(deps: PanelApiDeps, body: Record<string, unknown>) {

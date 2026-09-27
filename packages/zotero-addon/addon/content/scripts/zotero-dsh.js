@@ -379,6 +379,12 @@ var ZoteroDSH = {
     this._paperBar = paperBar;
     wrap.appendChild(paperBar);
 
+    // 选段回执：Zotero 侧自己渲染，不依赖 iframe 里的 DSH 会话被打开。
+    // 送入成功后才显示，写明页码与前几十字；再送一段就替换。
+    const quoteBar = el("div", "display:none;flex:0 0 auto;font:10px/1.5 system-ui,sans-serif;padding:4px 7px;border-radius:4px;background:rgba(64,114,229,.14);border-inline-start:3px solid #4072e5;overflow:hidden;");
+    this._quoteBar = quoteBar;
+    wrap.appendChild(quoteBar);
+
     const head = el("div", "display:flex;align-items:center;gap:6px;flex:0 0 auto;");
     head.appendChild(el("div", "font:12px system-ui;font-weight:600;", "DSH"));
     const status = el("div", "font:10px system-ui;opacity:.6;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
@@ -593,11 +599,44 @@ var ZoteroDSH = {
       this.diag("quote sent itemKey=" + payload.itemKey + " chars=" + String(payload.text || "").length
         + " ask=" + !!payload.ask + " status=" + (xhr ? xhr.status : "?")
         + " ok=" + (data && data.ok) + (data && data.error ? " error=" + data.error : ""));
-      if (data && data.ok === false && data.error) this.notify("送入失败：" + data.error);
+      if (data && data.ok === false && data.error) {
+        this.showQuoteError(data.error);
+        this.notify("送入失败：" + data.error);
+      } else {
+        this.showQuoteReceipt({ page: payload.page, text: payload.text, ask: payload.ask });
+      }
     } catch (e) {
       this.diag("quote failed: " + e);
+      this.showQuoteError(String(e));
       this.notify("送入失败：" + String(e).slice(0, 80));
     }
+  },
+
+  /** 在面板顶部画出最近一次送入的选段。 */
+  showQuoteReceipt(info) {
+    const bar = this._quoteBar;
+    if (!bar) return;
+    const text = String(info.text || "").replace(/\s+/g, " ").trim();
+    const head = info.page ? "已送入 DSH · 第 " + info.page + " 页" : "已送入 DSH";
+    const tail = info.ask ? " · 已追问" : "";
+    bar.textContent = "";
+    const line1 = bar.ownerDocument.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    line1.setAttribute("style", "font-weight:600;opacity:.9;");
+    line1.textContent = head + tail;
+    const line2 = bar.ownerDocument.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    line2.setAttribute("style", "opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
+    line2.setAttribute("title", text);
+    line2.textContent = text.slice(0, 90) + (text.length > 90 ? "…" : "");
+    bar.appendChild(line1);
+    bar.appendChild(line2);
+    bar.setAttribute("style", "display:block;flex:0 0 auto;font:10px/1.5 system-ui,sans-serif;padding:4px 7px;border-radius:4px;background:rgba(64,114,229,.14);border-inline-start:3px solid #4072e5;overflow:hidden;");
+  },
+
+  showQuoteError(message) {
+    const bar = this._quoteBar;
+    if (!bar) return;
+    bar.textContent = "送入失败：" + String(message).slice(0, 120);
+    bar.setAttribute("style", "display:block;flex:0 0 auto;font:10px/1.5 system-ui,sans-serif;padding:4px 7px;border-radius:4px;background:rgba(204,41,54,.16);border-inline-start:3px solid #cc2936;overflow:hidden;");
   },
 
   /** 轻量提示：进度窗口，不打断阅读。 */
