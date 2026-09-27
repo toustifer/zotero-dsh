@@ -412,6 +412,31 @@ function injectText(agent: AgentLike, text: string): void {
   })
 }
 
+/**
+ * 注入一段 plugin 文本，带一次「陈旧 pending」兜底。
+ *
+ * agent.inject 在会话里压着一条没被消费的用户消息时直接抛
+ * "message ... is already pending"。那种残留多半来自上一次 DSH 重启，
+ * 或一次中途失败的投递 —— 而 openPaperChatSession 里没有兜底，
+ * 于是**整条**打开论文会话的链路就断在这里，面板那边只看到一个 error，
+ * 对话框是空的。这里清一次 stale 再试，和 deliverChatMessage 同一套做法。
+ */
+function injectTextResilient(agent: AgentLike, text: string, deps: PanelApiDeps, sessionId: string): void {
+  try {
+    injectText(agent, text)
+    return
+  } catch (err: unknown) {
+    console.log(
+      `[dsh-zotero] inject failed (${sessionId}): ${String((err as Error)?.message ?? err)} — clearing stale pending and retrying`,
+    )
+  }
+  try {
+    const stale = agentsOf(deps)?.get(sessionId)
+    if (stale?.cancel) stale.cancel({ kind: 'user' }, { keepInbox: false })
+  } catch { /* 清理是尽力而为 */ }
+  injectText(agent, text)
+}
+
 function followupText(agent: AgentLike, text: string): void {
   agent.followup(createUserMessage({
     content: [{ type: 'text', text }],
@@ -543,7 +568,7 @@ export async function openPaperChatSession(
   if (!conv.injectedAt || body.force) {
     const built = await buildPaperContext(deps, { ...body, itemKey })
     if (!built.ok) return { ok: false, sessionId, error: built.error ?? '构建论文上下文失败' }
-    injectText(agent, built.text)
+    injectTextResilient(agent, built.text, deps, sessionId)
     chars = built.text.length
     conv.injectedAt = Date.now()
   }

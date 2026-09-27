@@ -25,7 +25,7 @@ token 每次都从 DSH 实例的日志里现取，所以 DSH 重启不会让它�
 
 ## 第二步 · DSH 侧
 
-先下两个文件到**同一个目录**：`dsh-zotero-0.2.0.tgz` 加上对应平台的安装脚本 ——
+先下两个文件到**同一个目录**：`dsh-zotero-0.2.1.tgz` 加上对应平台的安装脚本 ——
 **Windows 用 `install-dsh.ps1`，macOS / Linux 用 `install-dsh.sh`**。
 
 ### Windows

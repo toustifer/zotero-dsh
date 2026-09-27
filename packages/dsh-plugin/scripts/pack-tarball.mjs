@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process'
 
 const HERE = resolve(dirname(fileURLToPath(import.meta.url)))
 const PKG = resolve(HERE, '..')
-const OUT = process.argv[2] || join(PKG, '..', '..', 'install', 'dsh-zotero-0.2.0.tgz')
+const OUT = process.argv[2] || join(PKG, '..', '..', 'install', 'dsh-zotero-0.2.1.tgz')
 const STAGE = join(process.env.TEMP || '/tmp', 'dshz-pack-' + Date.now())
 
 rmSync(STAGE, { recursive: true, force: true })
@@ -23,6 +23,14 @@ for (const f of ['package.json', 'cordis.patch.yml', 'dsh.plugin.json']) {
   cpSync(join(PKG, f), join(STAGE, f))
 }
 cpSync(join(PKG, 'lib'), join(STAGE, 'lib'), { recursive: true })
+
+// 科研预设跟着宿主插件一起发。它是 DSH 的用户预设（<DshHome>/.agent-presets/research），
+// 不属于插件本身，但少了它这套东西就只是个空壳：模型不知道该用什么纪律读文献。
+// 安装脚本从解包目录里把它拷进 DSH 的用户预设根。
+if (existsSync(join(PKG, 'presets'))) {
+  cpSync(join(PKG, 'presets'), join(STAGE, 'presets'), { recursive: true })
+  console.log('[pack] bundled presets/')
+}
 
 // 只挑宿主真正 require.resolve 的那一个文件
 const workerSrc = join(PKG, 'node_modules', 'pdfjs-dist')
@@ -37,7 +45,7 @@ if (existsSync(workerSrc)) {
 }
 
 rmSync(OUT, { force: true })
-const r = spawnSync('tar', ['-czf', OUT, 'package.json', 'cordis.patch.yml', 'dsh.plugin.json', 'lib', 'node_modules'], {
+const r = spawnSync('tar', ['-czf', OUT, 'package.json', 'cordis.patch.yml', 'dsh.plugin.json', 'lib', 'presets', 'node_modules'], {
   cwd: STAGE,
   stdio: 'inherit',
 })
