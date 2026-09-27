@@ -339,16 +339,40 @@ var ZoteroDSH = {
     const ok = await actor.sendQuery("loadURI", { uri: url });
     this.diag("embed: sendQuery loadURI ok=" + ok);
     // 导航提交成功不等于页面正确（401 页同样返回 ok），所以落地后回读标题。
-    for (const delay of [2000, 3000]) {
-      await new Promise((r) => setTimeout(r, delay));
+    // 另外：DSH 重启期间这里必然拿到 "Problem loading page"，而面板不会自己恢复 ——
+    // 所以看到错误页就退避重试，最多几轮。
+    const isFailed = (title) => /Problem loading page|Server Not Found|Unable to connect|连接失败|无法连接/i.test(String(title || ""));
+    let lastTitle = "";
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await new Promise((r) => setTimeout(r, attempt === 0 ? 2000 : 4000));
       let title = "";
       let cur = "";
       try { title = br.contentTitle || ""; } catch (e) {}
       try { cur = br.currentURI ? br.currentURI.spec : ""; } catch (e) {}
-      this.diag("embed probe title=" + JSON.stringify(title)
+      lastTitle = title;
+      this.diag("embed probe#" + attempt + " title=" + JSON.stringify(title)
         + " uri=" + String(cur).replace(/token=[^&]*/, "token=***"));
-      if (title) break;
+      if (title && !isFailed(title)) break;
+      if (isFailed(title)) {
+        // 实例多半还在重启：重新读一次 token（重启会换），再导航。
+        try {
+          const fresh = await this.resolveDSHUrl();
+          if (fresh) url = fresh;
+        } catch (e) {}
+        try {
+          const a2 = br.browsingContext && br.browsingContext.currentWindowGlobal
+            ? br.browsingContext.currentWindowGlobal.getActor("PageData")
+            : null;
+          if (a2) {
+            await a2.sendQuery("loadURI", { uri: url });
+            this.diag("embed retry#" + attempt + " loadURI sent");
+          }
+        } catch (e) {
+          this.diag("embed retry#" + attempt + " failed: " + e);
+        }
+      }
     }
+    this.diag("embed final title=" + JSON.stringify(lastTitle));
     return { ok: !!ok, browser: br };
   },
 
