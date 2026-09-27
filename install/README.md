@@ -146,7 +146,10 @@ it would expose remote code execution to the network; use 127.0.0.1 instead
 ssh -N -L 127.0.0.1:13081:127.0.0.1:3080 <user>@<dsh-host>
 ```
 
-然后浏览器开 `http://127.0.0.1:13081/?token=<mac 上那个 token>`。
+然后浏览器开 `http://127.0.0.1:13081/?token=<那台机器上那个 token>`。
+
+**端口约定**：Zotero 研究工作台统一用 **3081**（`dsh web --port 3081 --no-open`）。
+Windows 那边如果同时开着 3080，那是另一件事（当前会话的宿主），别混。
 
 放进 `~/.ssh/config` 更省事：
 
