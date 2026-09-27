@@ -338,8 +338,33 @@ var ZoteroDSH = {
       return { ok: false, error: "browsingContext 未就绪" };
     }
     const actor = bc.currentWindowGlobal.getActor("PageData");
-    const ok = await actor.sendQuery("loadURI", { uri: url });
-    this.diag("embed: sendQuery loadURI ok=" + ok);
+
+    // 两条导航路径，平台上确实不同：
+    //   Zotero 9  —— PageData 的 sendQuery("loadURI") 直接完成导航
+    //   Zotero 10 —— 改成先 sendQuery("prepareLoad")，再由**父进程**调
+    //                browser.loadURI(newURI(url), { triggeringPrincipal })
+    //                （见 HiddenBrowser.mjs：内容进程发起的加载被限制在它自己能
+    //                 加载的 URL 上）。只走旧路在 10 上会返回 undefined 并停在
+    //                about:blank —— 实测就是这个症状。
+    let ok;
+    try {
+      const prepared = await actor.sendQuery("prepareLoad");
+      if (prepared) {
+        br.loadURI(Services.io.newURI(url), {
+          triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+        });
+        ok = true;
+        this.diag("embed: prepareLoad + loadURI (zotero 10 path)");
+      } else {
+        this.diag("embed: prepareLoad returned false, falling back");
+      }
+    } catch (e) {
+      this.diag("embed: prepareLoad path failed (" + e + "), falling back to sendQuery");
+    }
+    if (ok !== true) {
+      ok = await actor.sendQuery("loadURI", { uri: url });
+      this.diag("embed: sendQuery loadURI ok=" + ok);
+    }
     // 导航提交成功不等于页面正确（401 页同样返回 ok），所以落地后回读标题。
     // 另外：DSH 重启期间这里必然拿到 "Problem loading page"，而面板不会自己恢复 ——
     // 所以看到错误页就退避重试，最多几轮。
@@ -366,8 +391,17 @@ var ZoteroDSH = {
             ? br.browsingContext.currentWindowGlobal.getActor("PageData")
             : null;
           if (a2) {
-            await a2.sendQuery("loadURI", { uri: url });
-            this.diag("embed retry#" + attempt + " loadURI sent");
+            let sent = false;
+            try {
+              if (await a2.sendQuery("prepareLoad")) {
+                br.loadURI(Services.io.newURI(url), {
+                  triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+                });
+                sent = true;
+              }
+            } catch (e) { /* fall through */ }
+            if (!sent) await a2.sendQuery("loadURI", { uri: url });
+            this.diag("embed retry#" + attempt + " navigation sent");
           }
         } catch (e) {
           this.diag("embed retry#" + attempt + " failed: " + e);

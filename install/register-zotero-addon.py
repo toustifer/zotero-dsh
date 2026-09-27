@@ -22,12 +22,14 @@ import argparse
 import json
 import os
 import glob
+import subprocess
 import sys
 import time
 import urllib.parse
+import zipfile
 
 ADDON_ID = "zotero-dsh@fisfzy.local"
-ADDON_VERSION = "0.18.0"
+ADDON_VERSION = "0.18.1"  # 兜底值；正常情况下会被 xpi 里 manifest.json 的版本覆盖
 ADDON_NAME = "Zotero DSH"
 ADDON_DESC = "Embed DeepSeek Harness chat panel in Zotero."
 
@@ -65,14 +67,57 @@ def load(path):
         return json.load(fh)
 
 
+def version_from_xpi(xpi):
+    """从 xpi 里读版本号。
+
+    不要让它靠 ADDON_VERSION 常量同步：manifest 和这个脚本的版本号是两处手改，
+    迟早会漂。xpi 是待安装的那个东西，以它为准。
+    """
+    with zipfile.ZipFile(xpi) as z:
+        manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+    v = manifest.get("version")
+    if not v:
+        sys.exit("xpi manifest.json has no version — refusing to guess")
+    return v
+
+
+def zotero_running():
+    """Zotero 是否在运行。
+
+    必须在写 extensions.json 之前挡一道：Zotero 退出时会拿自己内存里的插件表
+    覆写 extensions.json，运行期间写进去的记录会被静默抹掉 —— 现象是"装的时候
+    一切正常，重启后插件没加载"，极难排查。
+
+    另外 macOS 上别用 pgrep -x Zotero 判断：Zotero 的进程名是小写的 zotero，
+    带 -x 的精确匹配是假阴性，会让人以为已经退出。
+    """
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq zotero.exe", "/NH"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            return "zotero.exe" in out.lower()
+        out = subprocess.run(
+            ["ps", "-Ao", "comm="], capture_output=True, text=True, timeout=15,
+        ).stdout
+        return any("zotero" in line.strip().lower() for line in out.splitlines())
+    except Exception:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xpi")
     ap.add_argument("--profile-dir")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="Zotero 正在运行时也照写（不推荐：记录可能被退出时抹掉）")
     args = ap.parse_args()
 
     if args.list:
+        running = zotero_running()
+        print("Zotero %s" % ("RUNNING" if running else "not running"))
         for p in candidate_profiles():
             ej = os.path.join(p, "extensions.json")
             n = len(load(ej).get("addons", [])) if os.path.isfile(ej) else 0
@@ -84,6 +129,16 @@ def main():
     xpi = os.path.abspath(os.path.expanduser(args.xpi))
     if not os.path.isfile(xpi):
         sys.exit("xpi not found: " + xpi)
+
+    if zotero_running() and not args.force:
+        sys.exit(
+            "Zotero is running — quit it first.\n"
+            "  It rewrites extensions.json from memory on exit, which would silently\n"
+            "  drop the record this script is about to write.\n"
+            "  (On macOS do not check with 'pgrep -x Zotero': the process is named\n"
+            "   lowercase 'zotero', so that match is a false negative.)\n"
+            "  Use --force to write anyway."
+        )
 
     profile = pick_profile(args.profile_dir)
     ej = os.path.join(profile, "extensions.json")
@@ -115,7 +170,7 @@ def main():
     rec.update({
         "id": ADDON_ID,
         "syncGUID": "zoterodsh00001",
-        "version": ADDON_VERSION,
+        "version": version_from_xpi(xpi),
         "type": "extension",
         "loader": None,
         "updateURL": "https://raw.githubusercontent.com/toustifer/zotero-dsh/main/packages/zotero-addon/updates.json",
@@ -169,7 +224,7 @@ def main():
     with open(ej, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=2, ensure_ascii=False)
 
-    print("registered %s -> %s" % (ADDON_ID, dest))
+    print("registered %s %s -> %s" % (ADDON_ID, version_from_xpi(xpi), dest))
     print("profile: %s (%d addons)" % (profile, len(doc["addons"])))
     print("restart Zotero to load it")
 
