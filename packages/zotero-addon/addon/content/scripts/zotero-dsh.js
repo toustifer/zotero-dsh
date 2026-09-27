@@ -660,6 +660,176 @@ var ZoteroDSH = {
     this._selectionHandler = null;
   },
 
+  /* ---------- 当前选中的论文 → DSH ---------- */
+
+  /**
+   * 把「用户此刻在 Zotero 里选中哪条」推给 DSH。
+   *
+   * 为什么需要：DSH 那边注入提示词上下文只能读我们推上去的东西 —— 它够不到
+   * Zotero 的选中状态。没有这条推送，模型每次都得先问"你指的是哪篇"，或者更糟：
+   * 拿记忆里的论文硬答。这条推送就是让"当前论文"变成模型每轮都能看到的事实。
+   *
+   * 节流 1.5s：按住方向键在条目列表里连翻会连发 select，不节流会把 DSH 打满。
+   */
+  registerFocusWatcher() {
+    try {
+      if (!Zotero.Notifier || typeof Zotero.Notifier.registerObserver !== "function") {
+        this.log("Notifier unavailable; focus watcher off");
+        return false;
+      }
+      this._focusObserver = {
+        notify: (event) => {
+          if (event !== "select") return;
+          this.scheduleFocusPush();
+        },
+      };
+      // 只收 item 的 select。collection / tab 的选中不是"在读哪篇论文"。
+      Zotero.Notifier.registerObserver(this._focusObserver, ["item"], this.id);
+      this.log("focus watcher registered");
+      // 补一次启动时的状态：Zotero 早就开着、用户也已经选好了，不会再产生 select 事件。
+      setTimeout(() => this.scheduleFocusPush(), 3000);
+      return true;
+    } catch (e) {
+      this.log("registerFocusWatcher failed: " + e);
+      return false;
+    }
+  },
+
+  unregisterFocusWatcher() {
+    try {
+      if (this._focusObserver) Zotero.Notifier.unregisterObserver(this._focusObserver);
+    } catch (e) {}
+    this._focusObserver = null;
+    if (this._focusTimer) {
+      try { clearTimeout(this._focusTimer); } catch (e) {}
+      this._focusTimer = null;
+    }
+  },
+
+  scheduleFocusPush() {
+    if (this._focusTimer) return;
+    this._focusTimer = setTimeout(() => {
+      this._focusTimer = null;
+      this.pushFocus().catch((e) => this.diag("pushFocus failed: " + e));
+    }, 1500);
+  },
+
+  /** 从当前选中项抽字段推给 /focus。选中附件/笔记/空时什么都不做（保留上一次）。 */
+  async pushFocus() {
+    let payload = null;
+    try {
+      const win = Zotero.getMainWindow();
+      const pane = win && win.ZoteroPane;
+      const items = (pane && pane.getSelectedItems) ? pane.getSelectedItems() : [];
+      // 附件和笔记也满足 isRegularItem() === false，要的是论文条目本身。
+      const item = (items || []).find((it) => it && typeof it.isRegularItem === "function" && it.isRegularItem());
+      if (!item) return;
+      payload = this.focusPayloadOf(item);
+    } catch (e) {
+      this.diag("pushFocus: cannot read selection: " + e);
+      return;
+    }
+    if (!payload || !payload.itemKey) return;
+
+    // 同一条目 + 同一页重复推没有意义。
+    const sig = payload.itemKey + "|" + payload.page;
+    if (sig === this._focusSig) return;
+
+    let url = null;
+    try { url = await this.apiUrl("/@dsh-external/dsh-zotero/api/focus"); } catch (e) {}
+    if (!url) return;
+    this._focusSig = sig;
+    try {
+      const xhr = await Zotero.HTTP.request("POST", url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 15000,
+      });
+      this.diag("focus pushed key=" + payload.itemKey + " page=" + (payload.page || "-")
+        + " status=" + (xhr ? xhr.status : "?"));
+    } catch (e) {
+      // 推失败就忘掉签名，下一次 select 还会再试 —— 否则 DSH 重启期间的失败会
+      // 让这条记录一直卡在"推过了"的状态里。
+      this._focusSig = null;
+      this.diag("focus push failed: " + e);
+    }
+  },
+
+  focusPayloadOf(item) {
+    try {
+      const creators = [];
+      try {
+        for (const c of item.getCreators() || []) {
+          const name = c.lastName
+            ? (c.lastName + (c.firstName ? " " + c.firstName : ""))
+            : String(c.name || "");
+          if (name) creators.push(name);
+        }
+      } catch (e) {}
+
+      let collection = "";
+      try {
+        const cols = item.getCollections() || [];
+        if (cols.length) {
+          const c = Zotero.Collections.get(cols[0]);
+          collection = c ? String(c.name || "") : "";
+        }
+      } catch (e) {}
+
+      let attachmentPath = "";
+      try {
+        for (const id of item.getAttachments() || []) {
+          const att = Zotero.Items.get(id);
+          if (att && typeof att.isPDFAttachment === "function" && att.isPDFAttachment()) {
+            attachmentPath = String(att.getFilePath() || "");
+            break;
+          }
+        }
+      } catch (e) {}
+
+      const date = String(item.getField("date") || "");
+      const yearMatch = date.match(/\d{4}/);
+
+      return {
+        itemKey: String(item.key || ""),
+        title: String(item.getField("title") || ""),
+        creators,
+        year: yearMatch ? yearMatch[0] : "",
+        collection,
+        attachmentPath,
+        page: this.currentReaderPage(item),
+      };
+    } catch (e) {
+      this.diag("focusPayloadOf failed: " + e);
+      return null;
+    }
+  },
+
+  /**
+   * 当前 reader 翻到第几页。
+   *
+   * Zotero 的 reader 状态是私有 API（Zotero.Reader._readers），版本之间会动，
+   * 所以整段包在 try 里：取不到就返回空串，宁可少一个字段也不猜一个页码。
+   */
+  currentReaderPage(item) {
+    try {
+      const readers = Zotero.Reader && Zotero.Reader._readers;
+      if (!Array.isArray(readers)) return "";
+      const mine = readers.filter((r) => {
+        if (!r) return false;
+        if (r.itemID === item.id) return true;
+        return !!(r._item && r._item.id === item.id);
+      });
+      if (!mine.length) return "";
+      const state = mine[0].state || mine[0]._state || null;
+      if (state && typeof state.pageIndex === "number") return String(state.pageIndex + 1);
+      return "";
+    } catch (e) {
+      return "";
+    }
+  },
+
   /**
    * 从临时注解里抽出可复现的位置信息。
    *
@@ -864,6 +1034,7 @@ var ZoteroDSH = {
       ZoteroDSH.registerItemPane();
       ZoteroDSH.registerMenu();
       ZoteroDSH.registerSelectionActions();
+      ZoteroDSH.registerFocusWatcher();
       ZoteroDSH.forcePaneSync();
       // onMainWindowLoad 在本机没被触发，改为主动轮询主窗口。
       [6000, 15000, 28000, 42000].forEach((d) => setTimeout(() => {
@@ -889,6 +1060,7 @@ var ZoteroDSH = {
       ZoteroDSH.unregisterItemPane();
       ZoteroDSH.unregisterMenu();
       ZoteroDSH.unregisterSelectionActions();
+      ZoteroDSH.unregisterFocusWatcher();
       try {
         const w = Services.wm.getMostRecentWindow(ZoteroDSH.CHAT_WINDOW_TYPE);
         if (w && !w.closed) w.close();
