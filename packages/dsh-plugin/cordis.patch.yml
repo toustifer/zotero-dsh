@@ -1,0 +1,7 @@
+# dsh-zotero bundle：host 侧按包名加载 lib/index.js；包名锚点（options.name ==
+# '@dsh-external/dsh-zotero'）让 client-modules 扫描器发现本包的 client half
+# （src/client → lib/client.js）。装配依赖 profile node_modules 下的包名称解析
+# （junction 或依赖安装均可），不要用 --patch 的 file:/// 相对路径写法。
+- insert:
+    - id: dsh-zotero
+      name: '@dsh-external/dsh-zotero'

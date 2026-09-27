@@ -1,0 +1,20 @@
+# build output
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+*.tgz
+
+# zotero addon build
+*.xpi
+
+# local tooling
+.agentflow-worktrees/
+.claude/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# runtime data — never commit local library caches
+data/
+*.log

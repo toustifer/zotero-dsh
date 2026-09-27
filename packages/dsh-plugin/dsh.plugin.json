@@ -1,0 +1,21 @@
+{
+  "id": "@dsh-external/dsh-zotero",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "Zotero 库接入 DSH：Local API 检索/阅读/笔记 + MinerU 全文解析 + 右侧栏面板（重构自 llm-for-zotero，AGPL-3.0）",
+  "engines": {
+    "dsh": ">=0.0.1"
+  },
+  "contributes": {
+    "tools": [
+      "zotero_health",
+      "zotero_library_search",
+      "zotero_get_item",
+      "zotero_collections",
+      "zotero_read_pdf",
+      "zotero_summarize",
+      "zotero_translate"
+    ],
+    "skills": []
+  }
+}
