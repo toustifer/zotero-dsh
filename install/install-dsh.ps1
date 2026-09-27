@@ -89,6 +89,23 @@ if ($existing -match [regex]::Escape($anchor)) {
   Say "anchor appended to $patch"
 }
 
+# ---- 5. install the research agent preset -----------------------------------
+# 预设放在 DSH 的用户根下，是给人改的东西 —— 已经存在就不覆盖。
+# 缺了它，工具照常可用，但模型不会按文献工作的纪律去用它们。
+$presetSrc = Join-Path $staging 'presetsesearch'
+if (Test-Path (Join-Path $presetSrc 'agent.cordis.yml')) {
+  $presetDst = Join-Path $DshHome '.agent-presetsesearch'
+  if (Test-Path $presetDst) {
+    Say "preset already at $presetDst -- left untouched (yours wins)"
+  } else {
+    New-Item -ItemType Directory -Force -Path $presetDst | Out-Null
+    Copy-Item (Join-Path $presetSrc '*') $presetDst -Recurse -Force
+    Say "research preset -> $presetDst"
+  }
+} else {
+  Say "no presets\research in the package -- skipping the agent preset"
+}
+
 Say ''
 Say "done. restart the DSH instance for profile '$Profile', for example:"
 Say "    dsh $Profile"

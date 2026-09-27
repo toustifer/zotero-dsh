@@ -128,6 +128,23 @@ YAML
   say "anchor appended to $PATCH"
 fi
 
+# ---- 5. install the research agent preset -----------------------------------
+# 预设放在 DSH 的用户根下，是给人改的东西 —— 已经存在就不覆盖。
+# 缺了它，工具照常可用，但模型不会按文献工作的纪律去用它们。
+PRESET_SRC="$STAGING/presets/research"
+if [ -f "$PRESET_SRC/agent.cordis.yml" ]; then
+  PRESET_DST="$DSH_HOME/.agent-presets/research"
+  if [ -d "$PRESET_DST" ]; then
+    say "preset already at $PRESET_DST — left untouched (yours wins)"
+  else
+    mkdir -p "$PRESET_DST"
+    cp -R "$PRESET_SRC/." "$PRESET_DST/"
+    say "research preset -> $PRESET_DST"
+  fi
+else
+  say "no presets/research in the package — skipping the agent preset"
+fi
+
 echo
 say "done. restart the DSH instance for profile '$PROFILE', for example:"
 say "    dsh $PROFILE"
