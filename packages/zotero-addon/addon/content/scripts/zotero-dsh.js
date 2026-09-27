@@ -137,7 +137,9 @@ var ZoteroDSH = {
         if (typeof nav.getEnabledPane === "function") {
           this.diag(tag + "getEnabledPane=" + nav.getEnabledPane(this.SECTION_ID));
         }
-        const t = nav.querySelector('[data-pane="' + this.SECTION_ID + '"]');
+        // sidenav 按钮的 data-pane 是 "<pluginID>-<paneID>"，不是裸 paneID ——
+        // 用精确匹配永远查不到，日志里那句 "button MISSING" 一直是假的。
+        const t = nav.querySelector('[data-pane$="' + this.SECTION_ID + '"]');
         if (t) {
           this.diag(tag + "button EXISTS hidden=" + t.parentElement.hidden);
         } else {
