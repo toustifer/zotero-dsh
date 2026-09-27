@@ -5,6 +5,11 @@
 
 ## 前提
 
+- **Zotero 7 / 9 / 10**
+- **一个跑得起来的 DSH Web 实例**
+- **macOS 额外一步**：Zotero 10 只认 `extensions.json` 里的记录，把 xpi 丢进
+  `extensions/` 目录本身不会被加载 —— 见下面「macOS / Zotero 10」。
+
 - **Zotero 7**
 - **一个跑得起来的 DSH Web 实例**：`npm i -g @deepseek-ai/dsh`，然后 `dsh web`。
   没有 DSH，Zotero 侧没有可嵌入的东西
@@ -81,6 +86,46 @@ pnpm 会重建 profile 的 `node_modules`，junction 被抹掉。**重跑一次�
 DSH 实例不在跑，或者它的日志不在脚本预期的位置。解析顺序是
 `~/.dsh-zotero/web-3081.log` → `~/.dsh/restart-web.stdout.log` → `~/.dsh/web.stdout.log`，
 各自取最后一条 `dsh web:` 行。诊断写在 `~/.dsh/zdsh-diag.log`。
+
+## macOS / Zotero 10
+
+在 macOS 上真机装过一次，有两个和 Windows 不同的地方。
+
+**一、Zotero 10 不扫描 `extensions/` 目录。** 把 xpi 放进去不算数，必须在
+`extensions.json` 里有一条记录。图形界面装当然可以，但要脚本化就用：
+
+```bash
+python3 register-zotero-addon.py --xpi zotero-dsh.xpi
+```
+
+它的做法是**从同一个 profile 里已有的一条 sideload 记录抄 schema**，而不是对着文档
+猜 —— 各大版本的 `extensions.json` 字段会变。抄不到就退出，不瞎写。先跑
+`--list` 可以看它认出了哪些 profile、各自装了几个插件。
+
+**跑之前请退出 Zotero**：它会覆写 `extensions.json`。
+
+**二、Local API 的开关要写进 `user.js`，不能写 `prefs.js`。**
+`prefs.js` 自己带着警告：「If you make changes to this file while the application is
+running, the changes will be overwritten when the application exits」——
+我第一次就是这么丢的。
+
+```bash
+cat >> "$HOME/Library/Application Support/Zotero/Profiles/<profile>/user.js" <<'EOF'
+user_pref("extensions.zotero.httpServer.enabled", true);
+user_pref("extensions.zotero.httpServer.localAPI.enabled", true);
+EOF
+```
+
+不开的话 `zotero_*` 全部报 "Local API is not enabled"，Zotero 侧的面板也只能
+显示空的。验证：`curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:23119/api/users/0/items?limit=1`
+应该回 200。
+
+**三、peer 依赖。** 宿主代码 import `@deepseek-ai/dsh-tools` / `dsh-llm` /
+`schemastery` / `cordis`，这些是 peer，tarball 里没有。`install-dsh.sh`
+会把它们从 `$DSH_HOME/profiles/node_modules/@deepseek-ai/` 链过去 —— 缺这一步启动直接
+`ERR_MODULE_NOT_FOUND`。第一次在 Mac 上就是卡在这里。
+
+实测环境：macOS 26.6.2 arm64 · Node 26.8.1 · DSH 0.1.5-rc.1 · Zotero 10.0.4。
 
 ## 为什么不用 `dsh plugin install`
 
