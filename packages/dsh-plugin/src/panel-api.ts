@@ -885,6 +885,8 @@ async function handle(
       if (path === '/papers/workspace') return send(res, 200, await paperWorkspace(deps, body))
       // Idea 研究区：init / create / list
       if (path === '/ideas') return send(res, 200, await ideasZone(deps, body))
+      // 两个分区的相对位置：把谁放到最前，就是谁当主视图
+      if (path === '/zones/order') return send(res, 200, await orderZones(deps, body))
       // 「送入 DSH」：Zotero 阅读器里的选区 → 该论文的会话（懒开）
       if (path === '/quote') return send(res, 200, await quoteIntoSession(deps, body))
       if (path === '/start-read') return send(res, 200, await startRead(deps, body))
@@ -1190,6 +1192,41 @@ function safeSegment(name: string): string {
     .slice(0, 80)
 }
 
+/**
+ * 调整两个分区在列表里的先后。
+ *
+ * DSH 侧栏是单列，没有 tab —— 谁排在前面，谁就是当下的主视图；排在后面的折叠起来
+ * 就是"另一个视图"。ideaFirst=true 把 Idea 研究区提到最前，Zotero 集合整体让位。
+ */
+async function orderZones(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const api = workspaceApiOf(deps)
+  if (!api?.insertBefore) return { ok: false, error: 'workspaceController 不支持排序' }
+  const ideasFirst = body.ideasFirst !== false
+  const ideasRoot = normPath(String(body.ideasRoot ?? '').trim() || defaultIdeasRoot())
+  const zoteroRoot = normPath(String(body.zoteroRoot ?? '').trim() || defaultCollectionsRoot())
+
+  const all = await listHostWorkspaces(deps)
+  const under = (p: string, root: string) => { const n = normPath(p); return n === root || n.startsWith(root + '/') }
+  const ideas = all.filter((w) => under(w.path, ideasRoot))
+  const collections = all.filter((w) => under(w.path, zoteroRoot))
+
+  try {
+    // insertBefore 省略 anchor = 追加到尾部，所以后挪的那一组落在后面。
+    // 想让 A 在前，就把 B 挪到尾部。
+    if (ideasFirst) {
+      for (const w of ideas) await api.insertBefore({ workspaceId: w.workspaceId })
+      for (const w of collections) await api.insertBefore({ workspaceId: w.workspaceId })
+    } else {
+      for (const w of collections) await api.insertBefore({ workspaceId: w.workspaceId })
+      for (const w of ideas) await api.insertBefore({ workspaceId: w.workspaceId })
+    }
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+  console.log(`[dsh-zotero] zones/order ideasFirst=${ideasFirst} ideas=${ideas.length} collections=${collections.length}`)
+  return { ok: true, ideasFirst, ideas: ideas.length, collections: collections.length }
+}
+
 /** Idea 研究区的默认根目录：和 Zotero 集合镜像并列，侧栏里是第二个分区。 */
 function defaultIdeasRoot(): string {
   const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
@@ -1257,6 +1294,11 @@ function defaultCollectionsRoot(): string {
   const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
   if (configured) return configured
   return join(homedir(), 'zotero-workspaces')
+}
+
+/** 路径归一化：统一分隔符与大小写，尾部斜杠去掉。两处比较路径的地方共用。 */
+function normPath(p: string): string {
+  return String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
 /** 集合树 → 镜像目录。返回 key → dir 的映射，供同步与单篇论文共用。 */

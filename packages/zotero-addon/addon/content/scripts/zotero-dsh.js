@@ -304,6 +304,8 @@ var ZoteroDSH = {
     bar.setAttribute("title", label + (key ? "\nitemKey: " + key : ""));
     this._currentPaperKey = key || null;
     this.diag("paper: " + (key || "?"));
+    // 选到哪篇，就为哪篇备好工作区 —— 不必手动点按钮。
+    if (key) this.autoWorkspace(key);
   },
 
   /* ---------- embedded browser mode ---------- */
@@ -689,17 +691,26 @@ var ZoteroDSH = {
     return out;
   },
 
-  /** 为当前论文开工作区（host 端按所属集合安置，有 PDF 才建）。 */
-  async makePaperWorkspace() {
-    const key = this._currentPaperKey;
-    const state = this._paperWsState;
-    const btn = this._paperWsBtn;
-    if (!key) { if (state) state.textContent = "先选中一篇论文"; return; }
-    if (btn) btn.disabled = true;
-    if (state) state.textContent = "正在建…";
+  /**
+   * 选中即确保工作区存在。
+   *
+   * 只对"这次会话里第一次见到的条目"发请求，避免每次重渲染都打一遍；host 侧
+   * createWorkspace 本身幂等，重复调用只会拿到 created=false。
+   */
+  autoWorkspace(key) {
+    if (!key) return;
+    if (!this._wsSeen) this._wsSeen = new Set();
+    if (this._wsSeen.has(key)) return;
+    this._wsSeen.add(key);
+    this.ensurePaperWorkspace(key, { silent: true });
+  },
+
+  /** 请求 host 为某篇论文建工作区（有 PDF 才建得出来）。 */
+  async ensurePaperWorkspace(key, opts) {
+    const silent = !!(opts && opts.silent);
     let url = null;
     try { url = await this.apiUrl("/@dsh-external/dsh-zotero/api/papers/workspace"); } catch (e) {}
-    if (!url) { if (state) state.textContent = "DSH 地址未就绪"; if (btn) btn.disabled = false; return; }
+    if (!url) return null;
     try {
       const xhr = await Zotero.HTTP.request("POST", url, {
         body: JSON.stringify({ itemKey: key }),
@@ -707,19 +718,37 @@ var ZoteroDSH = {
         responseType: "json",
         timeout: 20000,
       });
-      const data = xhr && xhr.response;
-      this.diag("paper workspace " + key + " ok=" + (data && data.ok) + (data && data.error ? " err=" + data.error : ""));
-      if (data && data.ok) {
-        if (state) state.textContent = "已建：" + String(data.path || "").split("\\").slice(-1)[0];
-        this.notify("工作区已建好");
-      } else {
-        if (state) state.textContent = String((data && data.error) || "建失败");
+      const data = (xhr && xhr.response) || null;
+      const ok = !!(data && data.ok);
+      this.diag("paper ws " + key + " ok=" + ok + (data && data.error ? " err=" + data.error : "")
+        + (data && data.created === false ? " (already)" : ""));
+      if (ok && data.created === false) return data;
+      if (ok) {
+        const tail = String(data.path || "").split("\\").slice(-1)[0];
+        if (this._paperWsState) this._paperWsState.textContent = "工作区：" + tail;
+        if (!silent) this.notify("工作区已建好");
+      } else if (!silent) {
         this.notify("建工作区失败：" + String((data && data.error) || ""));
+        if (this._paperWsState) this._paperWsState.textContent = String((data && data.error) || "建失败");
       }
+      return data;
     } catch (e) {
-      this.diag("paper workspace failed: " + e);
-      if (state) state.textContent = "请求失败";
+      this.diag("paper ws failed: " + e);
+      if (!silent && this._paperWsState) this._paperWsState.textContent = "请求失败";
+      return null;
     }
+  },
+
+  /** 按钮入口：手动重建（例如刚给条目补了 PDF）。 */
+  async makePaperWorkspace() {
+    const key = this._currentPaperKey;
+    const state = this._paperWsState;
+    const btn = this._paperWsBtn;
+    if (!key) { if (state) state.textContent = "先选中一篇论文"; return; }
+    if (btn) btn.disabled = true;
+    if (state) state.textContent = "正在建…";
+    if (this._wsSeen) this._wsSeen.delete(key)
+    await this.ensurePaperWorkspace(key, { silent: false });
     if (btn) btn.disabled = false;
   },
 
