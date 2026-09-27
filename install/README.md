@@ -127,6 +127,47 @@ EOF
 
 实测环境：macOS 26.6.2 arm64 · Node 26.8.1 · DSH 0.1.5-rc.1 · Zotero 10.0.4。
 
+## 跨机：让另一台机器用同一个 DSH
+
+**DSH 只能绑 loopback，这条路是封死的。** 试过 `--host 0.0.0.0`，它直接拒绝：
+
+```
+error: --host 0.0.0.0 is intentionally not supported yet for safety:
+it would expose remote code execution to the network; use 127.0.0.1 instead
+```
+
+（`--host` 的 schema 也只接受 `127.0.0.1` 与 `0.0.0.0`，填具体网卡地址会被判定为非法配置。）
+所以跨机访问走 **SSH 隧道** —— 这也正好保证只有一个 DSH 实例：另一台机器是**转发进来**，
+而不是自己再起一个。
+
+在要用它的那台机器上：
+
+```bash
+ssh -N -L 127.0.0.1:13081:127.0.0.1:3080 <user>@<dsh-host>
+```
+
+然后浏览器开 `http://127.0.0.1:13081/?token=<mac 上那个 token>`。
+
+放进 `~/.ssh/config` 更省事：
+
+```
+Host mac-dsh
+    HostName 100.72.122.75
+    User stifer
+    LocalForward 127.0.0.1:13081 127.0.0.1:3080
+    ExitOnForwardFailure yes
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+    RequestTTY no
+```
+
+```bash
+ssh -N mac-dsh        # 挂上隧道，之后开 http://127.0.0.1:13081/
+```
+
+**为什么 DSH 那台必须是 Mac**：`dsh-zotero` 要读 Zotero 的 Local API，而那个接口同样
+只绑 loopback（`127.0.0.1:23119`，实测 Zotero 不接受任何其它地址）。两者必须同机。
+
 ## 为什么不用 `dsh plugin install`
 
 这个包还没发到 npm。而且它的构建依赖 DSH 内部的 `@deepseek-ai/*` 包（部分是 peer、
