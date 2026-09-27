@@ -621,6 +621,17 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
 
 export function apply(ctx: ClientContext): void {
   SESSIONS = ctx.sessions
+  // 选段卡要造草稿附件，需要会话服务的 createDrafts，而组件 props 里没有 ctx。
+  // 注意：apply 执行时该服务还没注册（实测 ctx.conversation 为 undefined，
+  // ctx.get('conversation') 才是通的），所以这里只放一个惰性读取器，用时再取。
+  ;(globalThis as { __DSHZ_GET_CONVERSATION__?: unknown }).__DSHZ_GET_CONVERSATION__ = () => {
+    try {
+      const c = (ctx as { get?: (n: string) => unknown }).get?.('conversation') ?? (ctx as { conversation?: unknown }).conversation
+      return c ?? null
+    } catch {
+      return null
+    }
+  }
 
   // 选段卡挂在 composer 上方：Zotero 送进来的那段话，点一下经 setDraft 追加进草稿。
   ctx.effect(() => {
