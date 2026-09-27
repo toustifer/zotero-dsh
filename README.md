@@ -4,6 +4,7 @@
 
 > `dsh-zotero` 是「DSH 里的 Zotero」，`zotero-dsh` 是「Zotero 里的 DSH」。
 > 这个仓库装的是后者，并且把两个方向放在一起。
+> 姊妹项目：[Fisfzy/dsh-zotero](https://github.com/Fisfzy/dsh-zotero)（DSH 侧，独立仓库）。
 
 ## 目录
 
