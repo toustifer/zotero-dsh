@@ -8,7 +8,7 @@
 
 var ZoteroDSH = {
   id: "zotero-dsh@fisfzy.local",
-  version: "0.17.0",
+  version: "0.18.0",
 
   PREF_URL: "extensions.zotero-dsh.url",
   MENU_ID: "zotero-dsh-tools-item",
@@ -206,7 +206,8 @@ var ZoteroDSH = {
    * 旧实现只要 pref 里带 token 就直接返回，于是 dsh 一重启 token 就过期，
    * 面板停在 401 页 —— 这里是那次修复。
    */
-  async resolveDSHUrl() {
+  /** base 与 token 分开拿：内嵌面板要完整 URL，POST /quote 要能自己拼路径。 */
+  async resolveParts() {
     var saved = null;
     try { saved = Zotero.Prefs.get(this.PREF_URL, true); } catch (e) {}
     const base = this.baseFromUrl(saved) || this.DEFAULT_BASE;
@@ -214,9 +215,21 @@ var ZoteroDSH = {
     // 只记长度，不落盘 token 本身。
     this.log("resolve base=" + base + " token=" + (token ? token.length + "ch" : "MISSING")
       + " prefHadToken=" + Boolean(saved && saved.indexOf("token=") !== -1));
+    return { base, token, savedUrl: saved || null };
+  },
+
+  async resolveDSHUrl() {
+    const { base, token, savedUrl } = await this.resolveParts();
     if (token) return this.appendToken(base, token);
     // 日志读不到时退回 pref 原值，可能已过期，但总比没有地址强。
-    return saved || base;
+    return savedUrl || base;
+  },
+
+  /** base + 插件 API 路径 + 现取的 token。 */
+  async apiUrl(endpoint) {
+    const { base, token } = await this.resolveParts();
+    const root = String(base).replace(/\/+$/, "");
+    return root + endpoint + (token ? "?token=" + token : "");
   },
 
   /* ---------- item pane section ---------- */
@@ -495,6 +508,109 @@ var ZoteroDSH = {
     } catch (e) {}
   },
 
+  /* ---------- PDF selection -> DSH ---------- */
+
+  /**
+   * 在阅读器里选中文字时，往气泡里加两个按钮。
+   *
+   * 「送入 DSH」= VSCode 聊天里 "Add to Chat" 的语义：只把选段推进该论文的会话上下文，
+   * 用户接着自己写问题。「问 DSH」= 顺带追一轮，让模型直接回应这段。
+   * 会话按 itemKey 懒开 —— 在 Zotero 里读到哪里选中就送，不必先打开面板。
+   */
+  registerSelectionActions() {
+    try {
+      if (!Zotero.Reader || typeof Zotero.Reader.registerEventListener !== "function") {
+        this.log("Reader API unavailable; selection actions off");
+        return false;
+      }
+      this._selectionHandler = (event) => {
+        try {
+          const doc = event.doc;
+          const append = event.append;
+          const annotation = event.params && event.params.annotation;
+          if (!doc || typeof append !== "function" || !annotation) return;
+          const text = String(annotation.text || "");
+          if (!text.trim()) return;
+
+          const page = String(annotation.pageLabel || "");
+          const reader = event.reader;
+          const itemID = reader && reader.itemID;
+          const item = itemID ? Zotero.Items.get(itemID) : null;
+          const itemKey = item ? String(item.key || "") : "";
+          if (!itemKey) { this.diag("selection: no itemKey for reader item"); return; }
+
+          const style = "font:11px system-ui;padding:2px 8px;margin-inline-start:4px;border-radius:4px;cursor:pointer;";
+          const mk = (label, ask) => {
+            const btn = doc.createElement("button");
+            btn.textContent = label;
+            btn.setAttribute("style", style);
+            btn.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              this.sendQuote({ itemKey, page, text, ask });
+            });
+            return btn;
+          };
+          append(mk("送入 DSH", false));
+          append(mk("问 DSH", true));
+        } catch (e) {
+          this.diag("selection popup failed: " + e);
+        }
+      };
+      Zotero.Reader.registerEventListener("renderTextSelectionPopup", this._selectionHandler, this.id);
+      this.log("selection actions registered");
+      return true;
+    } catch (e) {
+      this.log("registerSelectionActions failed: " + e);
+      return false;
+    }
+  },
+
+  unregisterSelectionActions() {
+    // 注意：unregisterEventListener 的第二个参数是 handler 本身，不是 pluginID。
+    try {
+      if (this._selectionHandler) {
+        Zotero.Reader.unregisterEventListener("renderTextSelectionPopup", this._selectionHandler);
+      }
+    } catch (e) {}
+    this._selectionHandler = null;
+  },
+
+  /** 把选段 POST 给 dsh-zotero 的 /quote。 */
+  async sendQuote(payload) {
+    let url = null;
+    try { url = await this.apiUrl("/@dsh-external/dsh-zotero/api/quote"); } catch (e) {}
+    if (!url) { this.notify("DSH 地址未就绪，先确认实例在跑"); return; }
+    this.notify(payload.ask ? "已送入 DSH，正在请它解读…" : "选段已送入 DSH");
+    try {
+      const xhr = await Zotero.HTTP.request("POST", url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 20000,
+      });
+      const data = xhr && xhr.response;
+      this.diag("quote sent itemKey=" + payload.itemKey + " chars=" + String(payload.text || "").length
+        + " ask=" + !!payload.ask + " status=" + (xhr ? xhr.status : "?")
+        + " ok=" + (data && data.ok) + (data && data.error ? " error=" + data.error : ""));
+      if (data && data.ok === false && data.error) this.notify("送入失败：" + data.error);
+    } catch (e) {
+      this.diag("quote failed: " + e);
+      this.notify("送入失败：" + String(e).slice(0, 80));
+    }
+  },
+
+  /** 轻量提示：进度窗口，不打断阅读。 */
+  notify(text) {
+    try {
+      const pw = new Zotero.ProgressWindow({ closeOnClick: true });
+      pw.changeHeadline("Zotero DSH");
+      pw.addDescription(text);
+      pw.show();
+      pw.startCloseTimer(2600);
+    } catch (e) { this.diag("notify failed: " + e); }
+  },
+
   /* ---------- lifecycle ---------- */
 
   hooks: {
@@ -502,6 +618,7 @@ var ZoteroDSH = {
       ZoteroDSH.log("startup v" + ZoteroDSH.version);
       ZoteroDSH.registerItemPane();
       ZoteroDSH.registerMenu();
+      ZoteroDSH.registerSelectionActions();
       ZoteroDSH.forcePaneSync();
       // onMainWindowLoad 在本机没被触发，改为主动轮询主窗口。
       [6000, 15000, 28000, 42000].forEach((d) => setTimeout(() => {
@@ -526,6 +643,7 @@ var ZoteroDSH = {
       ZoteroDSH.log("shutdown");
       ZoteroDSH.unregisterItemPane();
       ZoteroDSH.unregisterMenu();
+      ZoteroDSH.unregisterSelectionActions();
       try {
         const w = Services.wm.getMostRecentWindow(ZoteroDSH.CHAT_WINDOW_TYPE);
         if (w && !w.closed) w.close();

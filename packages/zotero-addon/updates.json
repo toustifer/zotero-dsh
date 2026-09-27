@@ -3,8 +3,8 @@
     "zotero-dsh@fisfzy.local": {
       "updates": [
         {
-          "version": "0.17.0",
-          "update_link": "https://github.com/toustifer/zotero-dsh/releases/download/v0.17.0/zotero-dsh.xpi",
+          "version": "0.18.0",
+          "update_link": "https://github.com/toustifer/zotero-dsh/releases/download/v0.18.0/zotero-dsh.xpi",
           "applications": {
             "zotero": {
               "strict_min_version": "6.999",

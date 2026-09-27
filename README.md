@@ -34,6 +34,17 @@ Zotero 7 插件。在条目详情面板的右侧栏注册一个 section，里面
   从实例日志里读最后一条 `dsh web:` 行的 token。旧实现信任偏好项里的 token，
   于是 DSH 一重启，面板就停在 401 页
 
+### 在 PDF 里选中文字送进 DSH
+
+在 Zotero 自己的阅读器里选中一段话，气泡里会多出两个按钮：
+
+- **送入 DSH** —— 只把选段推进该论文的会话上下文，你接着自己写问题
+  （对应 VSCode 聊天里 "Add to Chat" 的语义）
+- **问 DSH** —— 顺带追一轮，让它直接解读这段
+
+会话按 `itemKey` **懒开**：没打开过面板也能送，第一段送进来时会自动带上论文元数据。
+实现走 `renderTextSelectionPopup` 事件 + `POST /quote`，不劫持 Zotero 的任何原生行为。
+
 ### 安装
 
 从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载 `zotero-dsh.xpi`，

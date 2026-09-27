@@ -75,6 +75,9 @@ export const API_PREFIX = '/@dsh-external/dsh-zotero/api'
 const READ_PROMPT =
   '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时用 zotero_retrieve 按问题检索最相关章节证据（快、省 token），或 zotero_read_fulltext 分段读取缓存全文（先免参拿 sections 章节偏移，再按 offset 精读各章），或用 zotero_summarize 补定向总结。'
 
+const QUOTE_ASK_PROMPT =
+  '请解读我刚刚从 Zotero 里送进来的这段选段：它在说什么，关键概念/公式/数字分别是什么，和本文主旨是什么关系。选段若被截断或缺少上下文，先指出缺什么，再给判断。需要更完整的上下文时用 zotero_retrieve 按问题检索相关章节。'
+
 const LIBRARY_MODE_PROMPT =
   '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_retrieve（按问题检索单篇论文内最相关章节证据，快且省 token）/ zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）/ zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字，引文标注章节）。一次不要读取超过 2 篇全文，保持回答有据可查。若库内有 zotero_search 工具（zotero-wave-rag），多篇/语义主题检索优先用它。\n\n分析能力（复刻 llm-for-zotero）：单篇总结 zotero_summarize（mode=overview|targeted|deep，depth=brief|standard|deep）；多篇 zotero_batch_summarize（2-10 篇批量总结+横向对比）；跨篇综述 zotero_review（itemKeys 或 query 自动收论文 → 要点提炼 → 综述）；相关文献 zotero_related（关键词重叠，零 LLM）。遇到“比较/总结这几篇”“写个综述”“找相关文献”类需求优先用它们。'
 
@@ -851,6 +854,8 @@ async function handle(
         /* empty body ok */
       }
       if (path === '/inject-context') return send(res, 200, await injectContext(deps, body))
+      // 「送入 DSH」：Zotero 阅读器里的选区 → 该论文的会话（懒开）
+      if (path === '/quote') return send(res, 200, await quoteIntoSession(deps, body))
       if (path === '/start-read') return send(res, 200, await startRead(deps, body))
       if (path === '/chat-open') return send(res, 200, await openPaperChatSession(deps, body))
       if (path === '/chat-open-library') return send(res, 200, await openLibraryChatSession(deps, body))
@@ -1491,6 +1496,79 @@ async function buildPaperContext(deps: PanelApiDeps, body: Record<string, unknow
   }
   const text = lines.join('\n')
   return { ok: true, chars: text.length, text }
+}
+
+/**
+ * 「送入 DSH」：把 Zotero PDF 里选中的一段文字推进该论文的会话。
+ *
+ * 和 /inject-context 的区别是粒度：那个推整篇论文的元数据或全文，这个只推一段选段，
+ * 而且会为该论文**懒开**一个会话 —— 在 Zotero 里读到哪里、选中就送，不必先打开面板。
+ *
+ * ask=true 时追加一轮追问让模型直接回应这段；默认只进上下文，等用户自己接着问
+ * （对应 VSCode 聊天里 "Add to Chat" 的语义）。
+ */
+async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const itemKey = String(body.itemKey ?? '').trim()
+  const text = String(body.text ?? '').trim()
+  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
+  if (!text) return { ok: false, error: '选中的文字为空' }
+
+  const page = String(body.page ?? '').trim()
+  const ask = body.ask === true
+
+  const store = readChatStore()
+  const mine = store.conversations
+    .filter((c) => c.kind === 'paper' && c.itemKey === itemKey)
+    .sort((a, b) => (b.seq || 1) - (a.seq || 1))
+  const conv = mine[0]
+  const sessionId = conv?.sessionId ?? `zotero-paper-${itemKey}`
+
+  let agent: AgentLike
+  try {
+    agent = await ensureLiveAgent(deps, sessionId, undefined)
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+
+  const quoted = text.split(/\r?\n/).map((line) => `> ${line}`).join('\n')
+  const head = page ? `【Zotero 选段 · 第 ${page} 页】` : '【Zotero 选段】'
+  const block = [
+    head,
+    quoted,
+    '',
+    '（这是用户此刻在 Zotero 里选中并送进来的原文，可能希望你解读、翻译，或与上面的讨论联系起来。）',
+  ].join('\n')
+
+  // 会话还没注入过论文元数据时一起带上，让模型知道这段话属于哪篇。
+  const fresh = !conv?.injectedAt
+  let context = ''
+  if (fresh) {
+    const built = await buildPaperContext(deps, { itemKey, mode: 'meta' })
+    if (built.ok) context = built.text + '\n\n'
+  }
+
+  try {
+    injectText(agent, context + block)
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+
+  if (conv) {
+    writeChatStore({
+      conversations: [
+        ...store.conversations.filter((c) => !(c.kind === 'paper' && c.itemKey === itemKey && c.seq === conv.seq)),
+        { ...conv, at: Date.now(), ...(fresh ? { injectedAt: Date.now() } : {}) },
+      ],
+    })
+  }
+
+  let followup = false
+  if (ask) {
+    try { followupText(agent, QUOTE_ASK_PROMPT); followup = true } catch { followup = false }
+  }
+
+  console.log(`[dsh-zotero] quote itemKey=${itemKey} page=${page || '-'} chars=${text.length} ask=${ask} session=${sessionId} opened=${!conv}`)
+  return { ok: true, sessionId, chars: text.length, page: page || undefined, followup, opened: !conv }
 }
 
 async function injectContext(deps: PanelApiDeps, body: Record<string, unknown>) {
