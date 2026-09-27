@@ -81,16 +81,23 @@ DSH 插件（`@dsh-external/dsh-zotero`）。注册 12 个 agent 工具和一个
 
 ### 安装
 
-从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载 `install-dsh.ps1`
-和 `dsh-zotero-0.1.1.tgz`，放同一个目录，然后：
+从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载
+`dsh-zotero-0.1.1.tgz` 加上对应平台的脚本，放同一个目录：
 
 ```powershell
-pwsh -File install-dsh.ps1
+pwsh -File install-dsh.ps1      # Windows
 ```
 
-脚本只做三件事：解包到 `~/.dsh/plugins/dsh-zotero`、在 profile 的 `node_modules`
-下建 junction、往 `cordis.patch.yml` 补一次加载锚点。**不编译。** 细节见
-[install/README.md](install/README.md)。
+```bash
+bash install-dsh.sh             # macOS / Linux
+```
+
+脚本只做四件事：解包到 `~/.dsh/plugins/dsh-zotero`、装唯一的运行依赖 `pdfjs-dist`、
+在 profile 的 `node_modules` 下建链接、往 `cordis.patch.yml` 补一次加载锚点。
+**不编译。** 细节见 [install/README.md](install/README.md)。
+
+宿主代码跨平台：唯一碰系统的位置是"打开文件或链接"，已经按 `process.platform` 分了
+`open` / `xdg-open` / `cmd start` 三条路。
 
 ### 自己构建
 

@@ -20,7 +20,10 @@ token 每次都从 DSH 实例的日志里现取，所以 DSH 重启不会让它�
 
 ## 第二步 · DSH 侧
 
-把 `install-dsh.ps1` 和 `dsh-zotero-0.1.1.tgz` 下到**同一个目录**，然后：
+先下两个文件到**同一个目录**：`dsh-zotero-0.1.1.tgz` 加上对应平台的安装脚本 ——
+**Windows 用 `install-dsh.ps1`，macOS / Linux 用 `install-dsh.sh`**。
+
+### Windows
 
 ```powershell
 pwsh -File install-dsh.ps1
@@ -38,7 +41,24 @@ pwsh -File install-dsh.ps1
 pwsh -File install-dsh.ps1 -Profile zotero
 ```
 
-然后重启 DSH 实例：
+### macOS / Linux
+
+```bash
+bash install-dsh.sh
+```
+
+脚本做四件事：解包到 `~/.dsh/plugins/dsh-zotero`、装它唯一的运行依赖 `pdfjs-dist`、
+在 profile 的 `node_modules/@dsh-external/` 下建符号链接、往 `cordis.patch.yml`
+补一次加载锚点。
+
+装到别的 profile、或 DSH 装在非默认位置：
+
+```bash
+bash install-dsh.sh --profile zotero
+bash install-dsh.sh --home /custom/dsh-home
+```
+
+### 然后重启 DSH 实例
 
 ```bash
 dsh web
