@@ -83,6 +83,15 @@ const LIBRARY_MODE_PROMPT =
 
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey', 'pdf2zhApiKey'])
 
+/**
+ * 每个会话最近一次从 Zotero 送进来的选段。
+ *
+ * 面板的 composer 卡（`conversation.input.dock`）读它，再经 `inputActions.setDraft`
+ * 追加到输入框 —— 那是 DSH 唯一一个"把外部文本写进草稿"的公开接口。
+ * 只留最近一条：这块是"刚送进来的那句话"，不是历史列表。
+ */
+const lastQuoteBySession = new Map<string, { page: string; text: string; ask: boolean; at: number; title: string }>()
+
 /* ── 文献聊天（M3.2 rev4）：每篇论文支持多个对话实例 + History 分组 ───
  * conversations[] 平铺：paper 实例 sessionId = zotero-paper-<key>[-<seq>]，
  * seq 从 1 递增；library 单实例（通用）zotero-library。
@@ -743,6 +752,17 @@ async function handle(
         return send(res, 200, { conversations: store.conversations })
       }
       // ── M4 论文 ↔ 工作区映射（v2：调研区 / 研究区）──
+      if (path === '/quote/latest') {
+        // 刻意不按 sessionId 过滤：选段是在 Zotero 阅读器里产生的，和用户此刻在 DSH
+        // 里开的是哪个会话没有关系 —— 面板上正在写问题的那个会话就该看到它。
+        const wanted = String(query.get('sessionId') ?? '')
+        let best: { sessionId: string; page: string; text: string; ask: boolean; at: number; title: string } | null = null
+        for (const [sid, q] of lastQuoteBySession) {
+          if (wanted && sid === wanted && !best) best = { sessionId: sid, ...q }
+          else if (!best || q.at > best.at) best = { sessionId: sid, ...q }
+        }
+        return send(res, 200, { ok: true, quote: best })
+      }
       if (path === '/map') return send(res, 200, projectSnapshot())
       if (path === '/map/workspaces') {
         const list = await listHostWorkspaces(deps)
@@ -1566,10 +1586,32 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
     if (built.ok) context = built.text + '\n\n'
   }
 
+  // 先记账再注入：面板的引用卡靠这份记录，注入成不成功都不该让用户看不到
+  // 自己刚送了什么 —— 卡片本身就是主路径，注入只是加分项。
+  lastQuoteBySession.set(sessionId, {
+    page,
+    text,
+    ask,
+    at: Date.now(),
+    title: String(body.title ?? '').trim(),
+  })
+
+  let injectError: string | undefined
   try {
     injectText(agent, context + block)
   } catch (err: unknown) {
-    return { ok: false, error: String((err as Error)?.message ?? err) }
+    injectError = String((err as Error)?.message ?? err)
+    // 会话里可能压着一条陈旧的 pending 消息（跨重启残留），清掉再试一次。
+    try {
+      const stale = agentsOf(deps)?.get(sessionId)
+      if (stale?.cancel) stale.cancel({ kind: 'user' }, { keepInbox: false })
+    } catch { /* best-effort */ }
+    try {
+      injectText(agent, context + block)
+      injectError = undefined
+    } catch (err2: unknown) {
+      injectError = String((err2 as Error)?.message ?? err2)
+    }
   }
 
   if (conv) {
@@ -1586,8 +1628,16 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
     try { followupText(agent, QUOTE_ASK_PROMPT); followup = true } catch { followup = false }
   }
 
-  console.log(`[dsh-zotero] quote itemKey=${itemKey} page=${page || '-'} chars=${text.length} ask=${ask} session=${sessionId} opened=${opened}`)
-  return { ok: true, sessionId, chars: text.length, page: page || undefined, followup, opened }
+  console.log(`[dsh-zotero] quote itemKey=${itemKey} page=${page || '-'} chars=${text.length} ask=${ask} session=${sessionId} opened=${opened}${injectError ? ' injectFailed=' + injectError : ''}`)
+  return {
+    ok: true,
+    sessionId,
+    chars: text.length,
+    page: page || undefined,
+    followup,
+    opened,
+    ...(injectError ? { warning: '选段已登记，但注入会话失败：' + injectError } : {}),
+  }
 }
 
 async function injectContext(deps: PanelApiDeps, body: Record<string, unknown>) {

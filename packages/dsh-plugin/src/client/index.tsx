@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
 import { CSS } from './theme'
 import { ChatWindow, dispatchChatOpen } from './ChatWindow'
+import { QuoteDock, QUOTE_DOCK_CSS } from './QuoteDock'
 import { PdfReader } from './PdfReader'
 
 /** ClientContext 需要的最小签名（sessions.create/list 见 dsh-api-session-controller/client）。 */
@@ -620,6 +621,31 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
 
 export function apply(ctx: ClientContext): void {
   SESSIONS = ctx.sessions
+
+  // 选段卡挂在 composer 上方：Zotero 送进来的那段话，点一下经 setDraft 追加进草稿。
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.setAttribute('data-dshz-quote-dock', '')
+    style.textContent = QUOTE_DOCK_CSS
+    document.head.appendChild(style)
+    return () => style.remove()
+  }, '@dsh-external/dsh-zotero: quote dock css')
+
+  ctx.effect(
+    () =>
+      ctx.slots.inject('conversation.input.dock', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.input.dock',
+            id: '@dsh-external/dsh-zotero-quote',
+            order: 20,
+            inject: (sessionId: unknown) => ({ sessionId: String(sessionId ?? '') }),
+          },
+          QuoteDock as never,
+        ),
+      ),
+    '@dsh-external/dsh-zotero: quote dock',
+  )
   ctx.effect(
     () =>
       ctx.slots.inject('conversation.view', () =>

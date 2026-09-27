@@ -45,6 +45,12 @@ Zotero 7 插件。在条目详情面板的右侧栏注册一个 section，里面
 会话按 `itemKey` **懒开**：没打开过面板也能送，第一段送进来时会自动带上论文元数据。
 实现走 `renderTextSelectionPopup` 事件 + `POST /quote`，不劫持 Zotero 的任何原生行为。
 
+**选段会出现在 DSH 输入框正上方。** DSH 侧注册在 `conversation.input.dock` 槽的引用卡
+显示刚送进来的那段话，点「附到问题」经 `inputActions.setDraft` 追加进草稿 ——
+DSH 唯一一个"把外部文本写进输入框"的公开接口。只加引用，不替你发送，
+和 VSCode 聊天里的 "Add to Chat" 是同一件事。送入的同一段话同时也注入了该论文会话的
+上下文，所以模型两处都看得到。
+
 ### 安装
 
 从 [最新 Release](https://github.com/toustifer/zotero-dsh/releases/latest) 下载 `zotero-dsh.xpi`，

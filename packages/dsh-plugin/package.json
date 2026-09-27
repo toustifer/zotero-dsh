@@ -9,7 +9,7 @@
   "files": [
     "lib"
   ],
-  "license": "AGPL-3.0-only",
+  "license": "BSD-3-Clause",
   "peerDependencies": {
     "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
@@ -44,7 +44,8 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ],
       "platform": "web"
     }
