@@ -20,7 +20,14 @@ import { registerM2Tools } from './tools-m2.ts'
 import { Config } from './config.ts'
 import type { Config as ZoteroConfig } from './config.ts'
 import type { ResolvedModel } from './ml.ts'
-import { API_PREFIX, PLUGIN_ID, panelApiHandler, pushChatLog, settleRunning } from './panel-api.ts'
+import {
+  API_PREFIX,
+  PLUGIN_ID,
+  focusContextText,
+  panelApiHandler,
+  pushChatLog,
+  settleRunning,
+} from './panel-api.ts'
 import { composeConfig, setActiveConfig, setBaseConfig } from './runtime.ts'
 
 type HostContext = Context & {
@@ -39,10 +46,17 @@ type HostContext = Context & {
     }): () => void
   }
   get(name: string): unknown
+  /**
+   * 提示词注册表（host plane，来自 @deepseek-ai/dsh-system-prompt）。
+   * 和 webServer 同样的理由写进 inject：可选服务经 ctx.get 在隔离作用域里取不到。
+   */
+  systemPrompt: {
+    context(c: { name: string; order: number; text: () => string }): unknown
+  }
 }
 
 export const name = PLUGIN_ID
-export const inject = ['tools', 'llm', 'webServer']
+export const inject = ['tools', 'llm', 'webServer', 'systemPrompt']
 
 export { Config }
 
@@ -60,6 +74,7 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
   setActiveConfig(composeConfig())
   const active = composeConfig()
 
+  const systemPrompt = ctx.systemPrompt
   const client = new ZoteroClient({ config: active })
   const agentDefaultModel = ctx.get('agentDefaultModel') as { currentSelection(): ResolvedModel } | undefined
   registerZoteroTools(ctx as { tools: { register(tool: unknown): void } }, client, active)
@@ -100,6 +115,32 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
         log('route disposed')
       }
     }, `${PLUGIN_ID}: panel api route`)
+  }
+
+  // ── 当前选中的论文 → 动态提示词上下文 ──
+  // systemPrompt.context 的 text 在**每次组装**时重新求值，所以 Zotero 里换一篇
+  // 选中的论文，模型下一步就看到了 —— 不需要用户点任何按钮，也不用重开会话。
+  // 返回空串时会被组装层过滤掉，于是"没选中任何东西"等于什么都不注入。
+  if (systemPrompt?.context) {
+    ctx.effect(
+      () =>
+        systemPrompt.context({
+          name: 'zotero:focus',
+          order: 40,
+          text: () => {
+            try {
+              return focusContextText()
+            } catch {
+              // 提示词组装失败会毁掉整轮对话，这里绝不把异常放出去。
+              return ''
+            }
+          },
+        }),
+      `${PLUGIN_ID}: focus context`,
+    )
+    log('focus prompt context registered')
+  } else {
+    log('systemPrompt unavailable — focus context NOT registered')
   }
 
   // ── 文献会话消息缓存（M3.2「对话」tab 面板渲染源） ──

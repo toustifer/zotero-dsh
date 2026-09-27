@@ -95,6 +95,53 @@ const lastQuoteBySession = new Map<
   { page: string; text: string; ask: boolean; at: number; title: string; itemKey: string; locator: Record<string, unknown> | null }
 >()
 
+/**
+ * Zotero 此刻选中的是哪一条。
+ *
+ * 这是本模块唯一一个**不按会话分桶**的状态：用户在 Zotero 里点中的那条论文，
+ * 对每一个 DSH 会话都成立，拿 sessionId 去分开存反而会让新会话看不到它。
+ * 由 host 侧注册的动态提示词上下文读取（见 index.ts 的 zotero:focus），
+ * 于是"现在在读哪篇、PDF 落在磁盘哪里"这件事不需要用户点任何按钮。
+ */
+export interface FocusState {
+  itemKey: string
+  title: string
+  creators: string[]
+  year: string
+  collection: string
+  attachmentPath: string
+  page: string
+  at: number
+}
+let lastFocus: FocusState | null = null
+
+/** 当前选中的论文（供 host 侧提示词上下文读取）。 */
+export function currentFocus(): FocusState | null {
+  return lastFocus
+}
+
+/** 渲染成注入给模型的运行时上下文；没选中时返回空串（空文本会被组装层丢掉）。 */
+export function focusContextText(): string {
+  const f = lastFocus
+  if (!f || !f.itemKey) return ''
+  // 超过两小时没动过就当用户已经离开这篇了 —— 免得模型拿着昨天选的那条当"当前"。
+  if (Date.now() - f.at > 2 * 60 * 60 * 1000) return ''
+  const lines: string[] = []
+  lines.push('【当前论文 · 用户在 Zotero 里正选中这一条】')
+  lines.push(`- 标题: ${f.title || '(无标题)'}`)
+  if (f.creators.length) lines.push(`- 作者: ${f.creators.join(', ')}`)
+  if (f.year) lines.push(`- 年份: ${f.year}`)
+  if (f.collection) lines.push(`- 所在集合: ${f.collection}`)
+  if (f.attachmentPath) lines.push(`- PDF: ${f.attachmentPath}`)
+  if (f.page) lines.push(`- 用户当前翻到: 第 ${f.page} 页`)
+  lines.push(`- Zotero key: ${f.itemKey}`)
+  lines.push(
+    '需要读它就走 zotero_read_pdf / zotero_read_fulltext / zotero_retrieve（itemKey 用上面这个），' +
+      '不要用文件系统去翻 Zotero 的存储目录 —— 上面的 PDF 路径只是给你核对用的。',
+  )
+  return lines.join('\n')
+}
+
 /* ── 文献聊天（M3.2 rev4）：每篇论文支持多个对话实例 + History 分组 ───
  * conversations[] 平铺：paper 实例 sessionId = zotero-paper-<key>[-<seq>]，
  * seq 从 1 递增；library 单实例（通用）zotero-library。
@@ -768,6 +815,8 @@ async function handle(
         }
         return send(res, 200, { ok: true, quote: best })
       }
+      // 当前选中的论文。GET 给面板自检用，POST 由 Zotero 半边在选中变化时推上来。
+      if (path === '/focus') return send(res, 200, { ok: true, focus: currentFocus() })
       if (path === '/map') return send(res, 200, projectSnapshot())
       if (path === '/map/workspaces') {
         const list = await listHostWorkspaces(deps)
@@ -888,6 +937,23 @@ async function handle(
       // 两个分区的相对位置：把谁放到最前，就是谁当主视图
       if (path === '/zones/order') return send(res, 200, await orderZones(deps, body))
       // 「送入 DSH」：Zotero 阅读器里的选区 → 该论文的会话（懒开）
+      // Zotero 侧在选中变化 / 翻页时推上来。这里不做 Zotero 查询：推上来的
+      // 字段已经够渲染上下文了，再回查一次只会让"选中→模型看到"多一个失败点。
+      if (path === '/focus') {
+        const itemKey = String(body.itemKey ?? '').trim()
+        if (!itemKey) return send(res, 200, { ok: false, error: '缺少 itemKey' })
+        lastFocus = {
+          itemKey,
+          title: String(body.title ?? '').trim(),
+          creators: Array.isArray(body.creators) ? body.creators.map((c) => String(c)).filter(Boolean) : [],
+          year: String(body.year ?? '').trim(),
+          collection: String(body.collection ?? '').trim(),
+          attachmentPath: String(body.attachmentPath ?? '').trim(),
+          page: String(body.page ?? '').trim(),
+          at: Date.now(),
+        }
+        return send(res, 200, { ok: true, focus: lastFocus })
+      }
       if (path === '/quote') return send(res, 200, await quoteIntoSession(deps, body))
       if (path === '/start-read') return send(res, 200, await startRead(deps, body))
       if (path === '/chat-open') return send(res, 200, await openPaperChatSession(deps, body))
