@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG: Config = {
   requestTimeoutMs: 15000,
   searchLimit: 25,
   storageDir: '',
+  zoteroWorkspaceRoot: '',
   mineruMode: 'local',
   mineruLocalApiBase: 'http://127.0.0.1:8000',
   mineruLocalBackend: 'pipeline',
@@ -77,6 +78,7 @@ function sanitizeOverlay(raw: unknown): Partial<Config> {
   bool('ragEnabled'); str('cacheDir')
   str('translateTargetLang')
   str('pdf2zhBaseUrl'); str('pdf2zhApiKey'); str('pdf2zhModel'); num('pdf2zhThreads', 1, 16)
+  str('zoteroWorkspaceRoot')
   return out
 }
 

@@ -879,6 +879,12 @@ async function handle(
         /* empty body ok */
       }
       if (path === '/inject-context') return send(res, 200, await injectContext(deps, body))
+      // Zotero 集合树 → DSH 工作区（一对一镜像目录）
+      if (path === '/collections/sync') return send(res, 200, await syncCollections(deps, body))
+      // 单篇论文（有 PDF）→ 记录与复现用的工作区
+      if (path === '/papers/workspace') return send(res, 200, await paperWorkspace(deps, body))
+      // Idea 研究区：init / create / list
+      if (path === '/ideas') return send(res, 200, await ideasZone(deps, body))
       // 「送入 DSH」：Zotero 阅读器里的选区 → 该论文的会话（懒开）
       if (path === '/quote') return send(res, 200, await quoteIntoSession(deps, body))
       if (path === '/start-read') return send(res, 200, await startRead(deps, body))
@@ -1098,6 +1104,7 @@ interface HostWorkspaceApi {
   create?(req: { path: string }): Promise<{ workspace?: { workspaceId?: unknown; path?: unknown; title?: unknown }; created?: boolean }>
   rename?(req: { workspaceId: string; title: string }): Promise<unknown>
   insertBefore?(req: { workspaceId: string; beforeWorkspaceId?: string }): Promise<unknown>
+  delete?(req: { workspaceId: string }): Promise<unknown>
 }
 
 function workspaceApiOf(deps: PanelApiDeps): HostWorkspaceApi | undefined {
@@ -1173,6 +1180,254 @@ function ancestorDirs(target: string, rootSegs: string[]): string[] {
 function dirLabel(p: string): string {
   const segs = dirSegments(p)
   return segs.length > 0 ? segs[segs.length - 1] : p
+}
+
+/** 目录名安全化：Windows 不允许的字符换掉，首尾空白与点去掉。 */
+function safeSegment(name: string): string {
+  return String(name)
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .slice(0, 80)
+}
+
+/** Idea 研究区的默认根目录：和 Zotero 集合镜像并列，侧栏里是第二个分区。 */
+function defaultIdeasRoot(): string {
+  const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
+  if (configured) return join(dirname(configured), '_ideas')
+  return join(homedir(), 'zotero-ideas')
+}
+
+/**
+ * Idea 研究区：自己开的工作空间，不是 Zotero 集合的镜像。
+ *
+ * action: init 只建根与容器；create 在根下开一个想法目录并注册；list 列出已有的。
+ */
+async function ideasZone(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const api = workspaceApiOf(deps)
+  if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
+  const root = String(body.root ?? '').trim() || defaultIdeasRoot()
+  const action = String(body.action ?? 'create')
+
+  // 注意：不能把 api.create 取出来再调 —— workspaceController 是 cordis Service，
+  // 方法脱离宿主后 this.ctx 为空，内部会炸在 reading 'commands'。
+  const adopt = async (path: string, title: string) => {
+    try { mkdirSync(path, { recursive: true }) } catch (err: unknown) {
+      return { error: '建目录失败：' + String((err as Error)?.message ?? err) }
+    }
+    try {
+      const res = await api.create!({ path })
+      const wsId = res?.workspace?.workspaceId
+      if (typeof wsId !== 'string' || !wsId) return { error: 'create 未返回 workspaceId' }
+      try { await api.rename?.({ workspaceId: wsId, title }) } catch { /* 标题失败不阻断 */ }
+      try { await api.insertBefore?.({ workspaceId: wsId }) } catch { /* 排序失败不阻断 */ }
+      return { workspaceId: wsId, path, created: Boolean(res?.created) }
+    } catch (err: unknown) {
+      return { error: String((err as Error)?.message ?? err) }
+    }
+  }
+
+  if (action === 'init') {
+    const got = await adopt(root, String(body.containerTitle ?? '').trim() || 'Idea 研究区')
+    if ('error' in got) return { ok: false, error: got.error }
+    console.log(`[dsh-zotero] ideas/init ${root}`)
+    return { ok: true, root, containerId: got.workspaceId }
+  }
+
+  if (action === 'list') {
+    const all = await listHostWorkspaces(deps)
+    const norm = (s: string) => String(s).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const base = norm(root)
+    const items = all.filter((w) => { const p = norm(w.path); return p !== base && p.startsWith(base + '/') })
+    return { ok: true, root, items }
+  }
+
+  const name = String(body.name ?? '').trim()
+  if (!name) return { ok: false, error: '需要 name' }
+  const seg = safeSegment(name)
+  if (!seg) return { ok: false, error: '名字无法用作目录' }
+  const dir = join(root, seg)
+  const got = await adopt(dir, name)
+  if ('error' in got) return { ok: false, error: got.error }
+  console.log(`[dsh-zotero] ideas/create ${name} -> ${dir}`)
+  return { ok: true, root, name, path: dir, workspaceId: got.workspaceId, created: got.created }
+}
+
+/** 集合镜像的默认根目录。 */
+function defaultCollectionsRoot(): string {
+  const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
+  if (configured) return configured
+  return join(homedir(), 'zotero-workspaces')
+}
+
+/** 集合树 → 镜像目录。返回 key → dir 的映射，供同步与单篇论文共用。 */
+function mirrorDirs(
+  root: string,
+  tree: Array<{ key: string; name: string; parentKey: string | null }>,
+): { dirs: Map<string, string>; skipped: Array<{ key: string; name: string; reason: string }> } {
+  const dirs = new Map<string, string>()
+  const skipped: Array<{ key: string; name: string; reason: string }> = []
+  for (const c of tree) {
+    const seg = safeSegment(c.name)
+    if (!seg) { skipped.push({ key: c.key, name: c.name, reason: '名字无法用作目录' }); continue }
+    const parentDir = c.parentKey ? dirs.get(c.parentKey) : root
+    if (!parentDir) { skipped.push({ key: c.key, name: c.name, reason: '父集合未同步' }); continue }
+    dirs.set(c.key, join(parentDir, seg))
+  }
+  return { dirs, skipped }
+}
+
+/**
+ * 为单篇论文开一个工作区 —— 记录与复现的落脚点。
+ *
+ * 位置是「论文所属集合的镜像目录 / 论文标题」。只对有 PDF 的条目开：没有全文的话
+ * 这个目录只是个空壳，既没法记也没法复现。没有集合归属的落到根下的 _未分类。
+ */
+async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const itemKey = String(body.itemKey ?? '').trim()
+  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
+  const api = workspaceApiOf(deps)
+  if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
+
+  const got = await deps.client.scoped().getItem(itemKey)
+  if (!got.found || !got.item) return { ok: false, error: `条目不存在: ${itemKey}` }
+  const it = got.item
+  const pdf = (it.attachments ?? []).find((a) => a.isPdf)
+  if (!pdf) return { ok: false, error: '这篇没有 PDF 附件，先加全文再建工作区', title: it.title || itemKey }
+
+  const root = String(body.root ?? '').trim() || defaultCollectionsRoot()
+  let parentDir = join(root, '_未分类')
+  try {
+    const col = await deps.client.collections()
+    const mirrored = mirrorDirs(root, col.tree)
+    const owned = (it.collections ?? []).map((k) => mirrored.dirs.get(k)).filter((d): d is string => Boolean(d))
+    if (owned.length) {
+      // 同一篇可能挂多个集合，取路径最短的那个当落点，避免在不相干的深处建目录。
+      owned.sort((a, b) => a.length - b.length)
+      parentDir = owned[0]
+    }
+  } catch { /* 集合读不到就用 _未分类 */ }
+
+  const seg = safeSegment(String(it.title || itemKey).slice(0, 70))
+  const dir = join(parentDir, seg || itemKey)
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err: unknown) {
+    return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
+  }
+
+  try {
+    const res = await api.create({ path: dir })
+    const wsId = res?.workspace?.workspaceId
+    if (typeof wsId !== 'string' || !wsId) return { ok: false, error: 'create 未返回 workspaceId' }
+    try { await api.rename?.({ workspaceId: wsId, title: String(it.title || itemKey).slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
+    try { await api.insertBefore?.({ workspaceId: wsId }) } catch { /* 排序失败不阻断 */ }
+    console.log(`[dsh-zotero] papers/workspace ${itemKey} -> ${dir}`)
+    return { ok: true, itemKey, path: dir, workspaceId: wsId, created: Boolean(res?.created), pdf: pdf.title || pdf.filename || '' }
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+}
+
+/**
+ * 把 Zotero 的集合树一对一镜像成 DSH 工作区。
+ *
+ * 每个集合 = 一个工作区，cwd 是根目录下的镜像子目录。层级不靠任何元数据 ——
+ * Zotero 的 parentCollection 直接落成目录嵌套，DSH 侧栏再按目录嵌套还原成树。
+ * 所以改集合结构后重跑一次这个端点就够了。
+ *
+ * 集合里的论文不搬：工作区只提供 cwd，读哪篇由会话自己决定。
+ */
+async function syncCollections(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const api = workspaceApiOf(deps)
+  if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
+
+  let col
+  try {
+    col = await deps.client.collections()
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+  if (col.source === 'none') return { ok: false, error: col.error || 'Zotero 不可达', hint: col.hint }
+
+  const root = String(body.root ?? '').trim() || defaultCollectionsRoot()
+  try { mkdirSync(root, { recursive: true }) } catch (err: unknown) {
+    return { ok: false, error: '无法创建根目录 ' + root + '：' + String((err as Error)?.message ?? err) }
+  }
+
+  // 根自己也注册成容器，侧栏里就是一段可折叠的分区标题。
+  let containerId = ''
+  if (body.container !== false) {
+    const title = String(body.containerTitle ?? '').trim() || 'Zotero 集合'
+    try {
+      const res = await api.create!({ path: root })
+      const wsId = res?.workspace?.workspaceId
+      if (typeof wsId === 'string' && wsId) {
+        containerId = wsId
+        try { await api.rename?.({ workspaceId: wsId, title }) } catch { /* 标题失败不阻断 */ }
+      }
+    } catch { /* 容器失败不阻断，集合照旧 */ }
+  }
+
+  const dirOf = new Map<string, string>()
+  const synced: Array<{ key: string; name: string; depth: number; path: string; workspaceId: string }> = []
+  const skipped: Array<{ key: string; name: string; reason: string }> = []
+
+  for (const c of col.tree) {
+    const seg = safeSegment(c.name)
+    if (!seg) { skipped.push({ key: c.key, name: c.name, reason: '名字无法用作目录' }); continue }
+    const parentDir = c.parentKey ? dirOf.get(c.parentKey) : root
+    if (!parentDir) { skipped.push({ key: c.key, name: c.name, reason: '父集合未同步' }); continue }
+    const dir = join(parentDir, seg)
+    try {
+      mkdirSync(dir, { recursive: true })
+    } catch (err: unknown) {
+      skipped.push({ key: c.key, name: c.name, reason: '建目录失败：' + String((err as Error)?.message ?? err) })
+      continue
+    }
+    dirOf.set(c.key, dir)
+    if (body.__skipCreate) { synced.push({ key: c.key, name: c.name, depth: c.depth, path: dir, workspaceId: '' }); continue }
+    try {
+      const res = await api.create({ path: dir })
+      const wsId = res?.workspace?.workspaceId
+      if (typeof wsId !== 'string' || !wsId) { skipped.push({ key: c.key, name: c.name, reason: 'create 未返回 workspaceId' }); continue }
+      try { await api.rename?.({ workspaceId: wsId, title: c.name }) } catch { /* 标题失败不阻断 */ }
+      synced.push({ key: c.key, name: c.name, depth: c.depth, path: dir, workspaceId: wsId })
+    } catch (err: unknown) {
+      skipped.push({ key: c.key, name: c.name, reason: String((err as Error)?.message ?? err) })
+    }
+  }
+
+  // col.tree 已是深度优先，逐条追加到尾部即可还原同级顺序。容器排在自己那棵子树前面。
+  try {
+    if (containerId) await api.insertBefore?.({ workspaceId: containerId })
+    for (const s of synced) { if (s.workspaceId) await api.insertBefore?.({ workspaceId: s.workspaceId }) }
+  } catch { /* 排序失败不阻断 */ }
+
+  // 收尾：把 cwd 不在镜像根之下的工作区列出来。默认只报告，confirm 才真删 ——
+  // 手动建的工作区也在候选里，误删的代价比多跑一次大。
+  const stale: Array<{ workspaceId: string; title: string; path: string }> = []
+  if (body.prune) {
+    // 两边都要统一分隔符再比 —— root 来自调用方（可能是正斜杠），注册表里的是
+    // 反斜杠，直接前缀比较会把整棵树判成 stale。
+    const norm = (s: string) => String(s).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const rootNorm = norm(root)
+    const all = await listHostWorkspaces(deps)
+    for (const w of all) {
+      const p = String(w.path || '')
+      if (!p) continue
+      const pn = norm(p)
+      if (pn === rootNorm || pn.startsWith(rootNorm + '/')) continue
+      stale.push({ workspaceId: w.workspaceId, title: w.title, path: p })
+    }
+    if (body.confirm === true && api.delete) {
+      for (const s of stale) {
+        try { await api.delete({ workspaceId: s.workspaceId }) } catch { /* 单条失败不阻断 */ }
+      }
+    }
+  }
+
+  console.log(`[dsh-zotero] collections/sync root=${root} container=${containerId ? 'yes' : 'no'} synced=${synced.length} skipped=${skipped.length} stale=${stale.length}`)
+  return { ok: true, root, containerId, total: col.tree.length, synced, skipped, stale, pruned: body.confirm === true && Boolean(api.delete) }
 }
 
 /**

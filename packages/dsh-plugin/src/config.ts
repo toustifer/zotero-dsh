@@ -25,6 +25,11 @@ export interface Config {
   searchLimit: number
   /** Zotero data root (the parent of `storage/`); optional on-disk PDF fallback. */
   storageDir: string
+  /**
+   * Zotero 集合镜像成 DSH 工作区的根目录。
+   * 每个集合 = 一个工作区，cwd 是这里的镜像子目录；空则用 ~/zotero-workspaces。
+   */
+  zoteroWorkspaceRoot: string
   /** MinerU backend: local (mineru-api service) or cloud (mineru.net). */
   mineruMode: 'local' | 'cloud'
   /** MinerU local service base, e.g. http://127.0.0.1:8000 */
@@ -72,6 +77,7 @@ export const Config = z.object({
   requestTimeoutMs: z.number().min(1000).max(120000).default(15000),
   searchLimit: z.number().min(1).max(100).default(25),
   storageDir: z.string().default(''),
+  zoteroWorkspaceRoot: z.string().default(''),
   mineruMode: z.union(['local', 'cloud']).default('local'),
   mineruLocalApiBase: z.string().default('http://127.0.0.1:8000'),
   mineruLocalBackend: z.union(['pipeline', 'vlm', 'hybrid']).default('pipeline'),

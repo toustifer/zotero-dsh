@@ -409,6 +409,17 @@ var ZoteroDSH = {
     this._quoteBar = quoteBar;
     wrap.appendChild(quoteBar);
 
+    // 为当前论文开一个工作区：记录与复现的落脚点。有 PDF 才建得出来。
+    const wsRow = el("div", "display:flex;align-items:center;gap:6px;flex:0 0 auto;");
+    const wsBtn = el("button", "font:10px system-ui;padding:2px 8px;border-radius:4px;cursor:pointer;", "为这篇论文建工作区");
+    const wsState = el("span", "font:10px system-ui;opacity:.65;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "");
+    wsBtn.addEventListener("click", () => this.makePaperWorkspace());
+    wsRow.appendChild(wsBtn);
+    wsRow.appendChild(wsState);
+    this._paperWsBtn = wsBtn;
+    this._paperWsState = wsState;
+    wrap.appendChild(wsRow);
+
     const head = el("div", "display:flex;align-items:center;gap:6px;flex:0 0 auto;");
     head.appendChild(el("div", "font:12px system-ui;font-weight:600;", "DSH"));
     const status = el("div", "font:10px system-ui;opacity:.6;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
@@ -676,6 +687,40 @@ var ZoteroDSH = {
       + " y=" + out.yTop + ".." + out.yBottom + " lh=" + out.lineHeight + " sort=" + out.sortIndex
       + " rects=" + (out.rects ? out.rects.length : 0));
     return out;
+  },
+
+  /** 为当前论文开工作区（host 端按所属集合安置，有 PDF 才建）。 */
+  async makePaperWorkspace() {
+    const key = this._currentPaperKey;
+    const state = this._paperWsState;
+    const btn = this._paperWsBtn;
+    if (!key) { if (state) state.textContent = "先选中一篇论文"; return; }
+    if (btn) btn.disabled = true;
+    if (state) state.textContent = "正在建…";
+    let url = null;
+    try { url = await this.apiUrl("/@dsh-external/dsh-zotero/api/papers/workspace"); } catch (e) {}
+    if (!url) { if (state) state.textContent = "DSH 地址未就绪"; if (btn) btn.disabled = false; return; }
+    try {
+      const xhr = await Zotero.HTTP.request("POST", url, {
+        body: JSON.stringify({ itemKey: key }),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 20000,
+      });
+      const data = xhr && xhr.response;
+      this.diag("paper workspace " + key + " ok=" + (data && data.ok) + (data && data.error ? " err=" + data.error : ""));
+      if (data && data.ok) {
+        if (state) state.textContent = "已建：" + String(data.path || "").split("\\").slice(-1)[0];
+        this.notify("工作区已建好");
+      } else {
+        if (state) state.textContent = String((data && data.error) || "建失败");
+        this.notify("建工作区失败：" + String((data && data.error) || ""));
+      }
+    } catch (e) {
+      this.diag("paper workspace failed: " + e);
+      if (state) state.textContent = "请求失败";
+    }
+    if (btn) btn.disabled = false;
   },
 
   /** 把选段 POST 给 dsh-zotero 的 /quote。 */
