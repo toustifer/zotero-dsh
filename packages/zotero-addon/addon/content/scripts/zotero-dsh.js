@@ -545,6 +545,11 @@ var ZoteroDSH = {
           const itemKey = item ? String(item.key || "") : "";
           if (!itemKey) { this.diag("selection: no itemKey for reader item"); return; }
 
+          // Zotero 没有行号。能给的最接近定位是「页码 + 页内矩形」：
+          // sortIndex 是 Zotero 内部排序键（pageIndex|y|x，补零），rects 是 PDF 点单位。
+          // 两者都原样带上，落盘时可复现。
+          const locator = this.locatorOf(annotation, reader);
+
           const style = "font:11px system-ui;padding:2px 8px;margin-inline-start:4px;border-radius:4px;cursor:pointer;";
           const mk = (label, ask) => {
             const btn = doc.createElement("button");
@@ -553,7 +558,7 @@ var ZoteroDSH = {
             btn.addEventListener("click", (ev) => {
               ev.preventDefault();
               ev.stopPropagation();
-              this.sendQuote({ itemKey, page, text, ask });
+              this.sendQuote({ itemKey, page, text, ask, locator });
             });
             return btn;
           };
@@ -580,6 +585,73 @@ var ZoteroDSH = {
       }
     } catch (e) {}
     this._selectionHandler = null;
+  },
+
+  /**
+   * 从临时注解里抽出可复现的位置信息。
+   *
+   * Zotero 的注解没有行号 —— 它的定位单位是「页 + PDF 点矩形」。这里把矩形换算成
+   * 相对页顶的百分比，读起来比裸坐标直观；同时保留 sortIndex 与原始 rects 供精确定位。
+   */
+  locatorOf(annotation, reader) {
+    const out = {
+      pageLabel: "",
+      pageIndex: null,
+      totalPages: null,
+      lines: null,
+      yTop: null,
+      yBottom: null,
+      lineHeight: null,
+      xLeft: null,
+      xRight: null,
+      rects: null,
+      sortIndex: "",
+    };
+    try {
+      const raw = String(annotation.pageLabel || "");
+      // 实测见过 pageLabel 被填成 "7510314" 这种长数字串（PDF 自己的页码解析失败），
+      // 那种值当没有；短标签（"3"、"xii"）才是真的页码。
+      out.pageLabel = /^[0-9]{6,}$/.test(raw) ? "" : raw;
+
+      const pos = annotation.position;
+      if (pos && typeof pos === "object") {
+        if (typeof pos.pageIndex === "number") out.pageIndex = pos.pageIndex;
+        const rects = Array.isArray(pos.rects) ? pos.rects : null;
+        if (rects && rects.length) {
+          out.rects = rects;
+          let yTop = Infinity, yBottom = -Infinity, xLeft = Infinity, xRight = -Infinity;
+          for (const r of rects) {
+            if (!Array.isArray(r) || r.length < 4) continue;
+            yTop = Math.min(yTop, Number(r[1]));
+            yBottom = Math.max(yBottom, Number(r[3]));
+            xLeft = Math.min(xLeft, Number(r[0]));
+            xRight = Math.max(xRight, Number(r[2]));
+          }
+          if (Number.isFinite(yTop)) out.yTop = Math.round(yTop * 10) / 10;
+          if (Number.isFinite(yBottom)) out.yBottom = Math.round(yBottom * 10) / 10;
+          if (Number.isFinite(xLeft)) out.xLeft = Math.round(xLeft * 10) / 10;
+          if (Number.isFinite(xRight)) out.xRight = Math.round(xRight * 10) / 10;
+          // Zotero 没有行号，但每个矩形就是一行 —— 矩形的数量就是选区跨的行数，
+          // 相邻矩形的高差就是行高。这是最接近"第几行"的可得信息。
+          out.lines = rects.length;
+          if (rects.length >= 2) {
+            const a = rects[0], b = rects[1];
+            if (Array.isArray(a) && Array.isArray(b)) {
+              const d = Math.abs(Number(a[1]) - Number(b[1]));
+              if (d > 0.5) out.lineHeight = Math.round(d * 100) / 100;
+            }
+          }
+        }
+      }
+      out.sortIndex = String(annotation.sortIndex || "");
+      const state = reader && reader.state;
+      if (state && Array.isArray(state.pageLabels)) out.totalPages = state.pageLabels.length;
+      if (out.pageIndex === null && state && typeof state.pageIndex === "number") out.pageIndex = state.pageIndex;
+    } catch (e) { this.diag("locator failed: " + e); }
+    this.diag("locator lines=" + out.lines + " page=" + out.pageIndex + " label=" + JSON.stringify(out.pageLabel)
+      + " y=" + out.yTop + ".." + out.yBottom + " lh=" + out.lineHeight + " sort=" + out.sortIndex
+      + " rects=" + (out.rects ? out.rects.length : 0));
+    return out;
   },
 
   /** 把选段 POST 给 dsh-zotero 的 /quote。 */

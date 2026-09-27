@@ -90,7 +90,10 @@ const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey', 
  * 追加到输入框 —— 那是 DSH 唯一一个"把外部文本写进草稿"的公开接口。
  * 只留最近一条：这块是"刚送进来的那句话"，不是历史列表。
  */
-const lastQuoteBySession = new Map<string, { page: string; text: string; ask: boolean; at: number; title: string }>()
+const lastQuoteBySession = new Map<
+  string,
+  { page: string; text: string; ask: boolean; at: number; title: string; itemKey: string; locator: Record<string, unknown> | null }
+>()
 
 /* ── 文献聊天（M3.2 rev4）：每篇论文支持多个对话实例 + History 分组 ───
  * conversations[] 平铺：paper 实例 sessionId = zotero-paper-<key>[-<seq>]，
@@ -756,7 +759,9 @@ async function handle(
         // 刻意不按 sessionId 过滤：选段是在 Zotero 阅读器里产生的，和用户此刻在 DSH
         // 里开的是哪个会话没有关系 —— 面板上正在写问题的那个会话就该看到它。
         const wanted = String(query.get('sessionId') ?? '')
-        let best: { sessionId: string; page: string; text: string; ask: boolean; at: number; title: string } | null = null
+        let best:
+          | { sessionId: string; page: string; text: string; ask: boolean; at: number; title: string; itemKey: string; locator: Record<string, unknown> | null }
+          | null = null
         for (const [sid, q] of lastQuoteBySession) {
           if (wanted && sid === wanted && !best) best = { sessionId: sid, ...q }
           else if (!best || q.at > best.at) best = { sessionId: sid, ...q }
@@ -1594,6 +1599,8 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
     ask,
     at: Date.now(),
     title: String(body.title ?? '').trim(),
+    itemKey,
+    locator: body.locator && typeof body.locator === 'object' ? (body.locator as Record<string, unknown>) : null,
   })
 
   let injectError: string | undefined
@@ -1636,6 +1643,7 @@ async function quoteIntoSession(deps: PanelApiDeps, body: Record<string, unknown
     page: page || undefined,
     followup,
     opened,
+    locator: (body.locator as unknown) ?? null,
     ...(injectError ? { warning: '选段已登记，但注入会话失败：' + injectError } : {}),
   }
 }

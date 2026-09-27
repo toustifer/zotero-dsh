@@ -13,12 +13,28 @@
 import { useEffect, useRef, useState } from 'react'
 import { API } from './api'
 
+interface QuoteLocator {
+  pageLabel?: string
+  pageIndex?: number | null
+  totalPages?: number | null
+  lines?: number | null
+  yTop?: number | null
+  yBottom?: number | null
+  lineHeight?: number | null
+  xLeft?: number | null
+  xRight?: number | null
+  rects?: number[][] | null
+  sortIndex?: string
+}
+
 interface LatestQuote {
   page: string
   text: string
   ask: boolean
   at: number
   title: string
+  itemKey?: string
+  locator?: QuoteLocator | null
 }
 
 interface DockProps {
@@ -46,16 +62,59 @@ function fileName(quote: LatestQuote): string {
   return `${stem}${quote.page ? `-p${quote.page}` : ''}.md`
 }
 
-/** 附件正文：自带出处，模型读到就知道这段话从哪来。 */
+/**
+ * 附件正文：自带出处与位置。
+ *
+ * Zotero 的注解**没有行号** —— 它给的是「页 + 一组 PDF 点矩形」，每个矩形正好覆盖
+ * 一行。所以这里用三个可复现的量替代行号：页码、选区跨的行数、页内纵向区间；
+ * 原始矩形也原样留在末尾，需要精确复现时用它。
+ */
 function fileBody(quote: LatestQuote): string {
-  const lines = [
-    `# Zotero 选段${quote.page ? ` · 第 ${quote.page} 页` : ''}`,
+  const loc = quote.locator || {}
+  const pageNo = typeof loc.pageIndex === 'number' ? loc.pageIndex + 1 : null
+  const pageText = pageNo
+    ? `第 ${pageNo} 页${loc.pageLabel && loc.pageLabel !== String(pageNo) ? `（原书标注 ${loc.pageLabel}）` : ''}`
+    : quote.page
+      ? `第 ${quote.page} 页`
+      : ''
+
+  const meta: string[] = []
+  if (quote.title) meta.push(`- 论文：${quote.title}`)
+  if (quote.itemKey) meta.push(`- Zotero key：${quote.itemKey}`)
+  if (pageText) meta.push(`- 页面：${pageText}${loc.totalPages ? ` / 共 ${loc.totalPages} 页` : ''}`)
+  if (typeof loc.lines === 'number') {
+    meta.push(`- 位置：单次选区覆盖 ${loc.lines} 行`)
+  }
+  if (typeof loc.yTop === 'number') {
+    meta.push(
+      `- 页内纵向：y ${loc.yTop} → ${loc.yBottom}${loc.lineHeight ? `（行高 ${loc.lineHeight}）` : ''} · PDF 点，原点在页面左上`,
+    )
+  }
+  if (typeof loc.xLeft === 'number') {
+    meta.push(`- 横向：x ${loc.xLeft} → ${loc.xRight}`)
+  }
+  if (loc.sortIndex) meta.push(`- Zotero 排序键：${loc.sortIndex}`)
+
+  const quoted = quote.text
+    .trim()
+    .split(/\r?\n/)
+    .map((l) => `> ${l}`)
+    .join('\n')
+
+  const rects = loc.rects && loc.rects.length
+    ? ['', '## 选区矩形（每行一个，PDF 点）', '', ...loc.rects.map((r, i) => `${i + 1}. [${r.join(', ')}]`)]
+    : []
+
+  return [
+    `# Zotero 选段${pageText ? ` · ${pageText}` : ''}`,
     '',
-    quote.title ? `来源：${quote.title}` : '',
+    ...(meta.length ? [...meta, ''] : []),
+    quoted,
+    ...rects,
     '',
-    quote.text.trim(),
-  ]
-  return lines.filter((l) => l !== undefined).join('\n')
+    '---',
+    '由 zotero-dsh 从 Zotero 阅读器送入。',
+  ].join('\n')
 }
 
 export function QuoteDock({ sessionId, useInput, inputActions }: DockProps) {
