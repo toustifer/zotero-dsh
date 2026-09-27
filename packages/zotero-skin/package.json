@@ -1,0 +1,16 @@
+{
+  "name": "dsh-zotero-skin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zotero 风格皮肤：把 DSH Web GUI 的 --dsw-* 语义 token 重绑到 Zotero 官方色板（scss/themes/_light|_dark.scss）",
+  "main": "./lib/index.js",
+  "files": [
+    "lib"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

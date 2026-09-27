@@ -18,7 +18,9 @@ function startup({ id, version, resourceURI, rootURI }, reason) {
     ["content", "zotero-dsh", rootURI + "content/"],
   ]);
 
-  const ctx = { rootURI };
+  // addonVersion 让下面的脚本能报出自己真实的版本号。硬编码一份是上一个坑：
+  // 升级后日志里还是旧版本，看日志的人会误判"新代码没生效"。
+  const ctx = { rootURI, addonVersion: version };
   ctx._globalThis = ctx;
   Services.scriptloader.loadSubScript(
     rootURI + "content/scripts/zotero-dsh.js",

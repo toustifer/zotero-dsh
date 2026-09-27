@@ -5,6 +5,9 @@ dist/
 *.tsbuildinfo
 *.tgz
 
+# zotero-skin has no build step — its lib/index.js IS the source
+!packages/zotero-skin/lib/
+
 # build artifacts shipped via GitHub Releases, not committed
 *.xpi
 install/*.tgz

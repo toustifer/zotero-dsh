@@ -8,7 +8,8 @@
 
 var ZoteroDSH = {
   id: "zotero-dsh@fisfzy.local",
-  version: "0.18.0",
+  // 由 bootstrap.js 经 loadSubScript 的 sandbox 注入；兜底值只是给脱壳运行留的。
+  version: (typeof addonVersion !== "undefined" && addonVersion) || "0.0.0",
 
   PREF_URL: "extensions.zotero-dsh.url",
   MENU_ID: "zotero-dsh-tools-item",

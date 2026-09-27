@@ -1,0 +1,4 @@
+# dsh-zotero-skin：按包名加载 lib/index.js，向 index 注入一张 <style> 覆盖表。
+- insert:
+    - id: dsh-zotero-skin
+      name: dsh-zotero-skin
