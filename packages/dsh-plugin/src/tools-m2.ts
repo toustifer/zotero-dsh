@@ -15,7 +15,14 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type LlmService from '@deepseek-ai/dsh-llm'
 import type { Config } from './config.ts'
 import { MineruClient, MineruError } from './mineru/client.ts'
-import { attachmentCacheDir, readCachedMd, writeCache } from './mineru/cache.ts'
+import {
+  attachmentCacheDir,
+  offlineAttachmentKeys,
+  readCachedMd,
+  readManifest,
+  rememberAttachments,
+  writeCache,
+} from './mineru/cache.ts'
 import { fetchAttachmentPdf } from './zotero/pdf.ts'
 import type { ZoteroClient } from './zotero/client.ts'
 import { resolveModel, streamText } from './ml.ts'
@@ -77,13 +84,46 @@ export async function ensureParsed(
   exec?: { signal?: AbortSignal },
 ): Promise<ParsedPaper> {
   const cfg = currentConfig()
-  const got = itemKey ? await client.scoped(exec?.signal).getItem(itemKey) : null
+  let got: Awaited<ReturnType<ZoteroClient['getItem']>> | null = null
+  try {
+    got = itemKey ? await client.scoped(exec?.signal).getItem(itemKey) : null
+  } catch (err) {
+    /*
+     * Zotero 不可达（关着 / 重启中 / 崩了）。
+     *
+     * 缓存是按**附件 key** 落盘的，而附件 key 只能问 Zotero 要 —— 于是全文明明
+     * 就在磁盘上，工具却只能报错，模型只好自己去 Glob 翻缓存目录。这里用之前
+     * 成功查询时记下的索引（mineru/item-attachments.json）绕过去：命中缓存就
+     * 照常返回，只把 source 标成 offline 让调用方知道这份是从盘上读的。
+     *
+     * 索引里没有、或缓存不在，就还是把原始错误抛出去 —— 那说明这篇从没解析过，
+     * 确实需要 Zotero 在线。
+     */
+    const alt = itemKey ? offlineAttachmentKeys(cfg, itemKey, attachmentKey)[0] : String(attachmentKey ?? '')
+    const cached = alt ? readCachedMd(cfg, alt) : null
+    if (cached) {
+      return {
+        attachmentKey: alt,
+        title: readManifest(cfg, alt)?.title || alt,
+        md: cached,
+        source: 'cache(offline: Zotero 不可达)',
+        cacheDir: attachmentCacheDir(cfg, alt),
+        textChars: cached.length,
+      }
+    }
+    throw new Error(
+      `${String((err as Error)?.message ?? err)}（该条目没有本地解析缓存，需要 Zotero 在线）`,
+    )
+  }
   if (itemKey && got && (!got.found || !got.item)) {
     throw new Error(`条目不存在: ${itemKey}（${got.error}）`)
   }
   // 附件直解析模式（itemKey 可空）：attachmentKey 必填，标题回退到附件名。
   const item = (got?.item ?? null) as { title?: string; attachments?: Array<{ key: string; isPdf: boolean; title?: string }> } | null
   const atts = item?.attachments ?? []
+  // Record itemKey -> attachment keys so a later call can still reach the cache
+  // when Zotero is unreachable (see the catch above).
+  if (itemKey) rememberAttachments(cfg, itemKey, atts.map((a) => a.key))
   const attachment = item
     ? (attachmentKey ? atts.find((a) => a.key === attachmentKey) : undefined) ?? atts.filter((a) => a.isPdf)[0]
     : null

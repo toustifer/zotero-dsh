@@ -24,6 +24,65 @@ export interface MineruManifest {
   title?: string
 }
 
+/**
+ * itemKey -> the attachment keys already parsed for it.
+ *
+ * The cache is keyed by ATTACHMENT key, and the only way to learn an item's
+ * attachment keys is to ask Zotero. That makes an otherwise pure-disk cache
+ * unreachable whenever Zotero is down — closed for a DB write, restarting,
+ * crashed — even though full.md is sitting right there. This index is the map
+ * that survives without Zotero: recorded on every successful lookup, consulted
+ * only when the Local API cannot be reached.
+ */
+const INDEX_FILE = 'item-attachments.json'
+
+function indexPath(cfg: Config): string {
+  return join(resolveCacheDir(cfg), 'mineru', INDEX_FILE)
+}
+
+export function readAttachmentIndex(cfg: Config): Record<string, string[]> {
+  try {
+    const p = indexPath(cfg)
+    if (!existsSync(p)) return {}
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as Record<string, string[]>
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Remember (never forget) the attachment keys seen for one item. */
+export function rememberAttachments(cfg: Config, itemKey: string, attachmentKeys: string[]): void {
+  const keys = attachmentKeys.filter((k) => typeof k === 'string' && k.length > 0)
+  if (!itemKey || keys.length === 0) return
+  try {
+    const idx = readAttachmentIndex(cfg)
+    const merged = Array.from(new Set([...(idx[itemKey] ?? []), ...keys]))
+    if (merged.length === (idx[itemKey] ?? []).length) return
+    idx[itemKey] = merged
+    mkdirSync(join(resolveCacheDir(cfg), 'mineru'), { recursive: true })
+    writeFileSync(indexPath(cfg), JSON.stringify(idx, null, 2), 'utf8')
+  } catch {
+    /* The index is a convenience, never a failure. */
+  }
+}
+
+/**
+ * Attachment keys worth trying when Zotero cannot be asked, restricted to those
+ * that actually have a cached full.md. Preferred key (an explicit
+ * attachmentKey argument) is tried first.
+ */
+export function offlineAttachmentKeys(cfg: Config, itemKey: string, preferred?: string): string[] {
+  const fromIndex = readAttachmentIndex(cfg)[itemKey] ?? []
+  const ordered = preferred ? [preferred, ...fromIndex] : fromIndex
+  const seen = new Set<string>()
+  return ordered.filter((k) => {
+    if (!k || seen.has(k)) return false
+    seen.add(k)
+    return existsSync(join(attachmentCacheDir(cfg, k), 'full.md'))
+  })
+}
+
 export function resolveCacheDir(cfg: Config): string {
   if (cfg.cacheDir.trim()) return cfg.cacheDir
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
