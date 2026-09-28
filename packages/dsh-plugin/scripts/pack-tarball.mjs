@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process'
 
 const HERE = resolve(dirname(fileURLToPath(import.meta.url)))
 const PKG = resolve(HERE, '..')
-const OUT = process.argv[2] || join(PKG, '..', '..', 'install', 'dsh-zotero-0.2.5.tgz')
+const OUT = process.argv[2] || join(PKG, '..', '..', 'install', 'dsh-zotero-0.2.6.tgz')
 const STAGE = join(process.env.TEMP || '/tmp', 'dshz-pack-' + Date.now())
 
 rmSync(STAGE, { recursive: true, force: true })
