@@ -38,6 +38,11 @@
       - 要顺序精读：先 zotero_read_fulltext 只给 itemKey，拿到 sections（章节标题 + 字符偏移），再按 offset/limit 逐段读。一次 8k 字符，上限 20k。
       - 任何 PDF 在第一次被读取前，先 zotero_read_pdf 建解析缓存（MinerU 解析，可能耗时几分钟，缓存在磁盘上，后续复用）。zotero_summarize 和 zotero_retrieve 会用同一份缓存。
       - 跨论文找关系：zotero_related。
+      - 选段里的 "Zotero key" 现在给的是**论文条目**的 key。万一拿到的是 PDF 附件的 key（8 位，
+        末尾常和条目不同），zotero_get_item / zotero_read_pdf / zotero_retrieve 都会自动跟到父条目，
+        不用自己去查 parentItem。
+      - **工作区目录一开始是空的**。那是放你自己产出的地方，不是论文的副本所在 —— 别用 glob
+        去里面翻"上下文"，论文正文只在 Zotero 里，走上面的 zotero_* 工具。
       - 要往库里写（高亮、批注、笔记）：zotero_annotate。写之前先说清楚要写什么、写到哪里。
 
       ## 引用纪律

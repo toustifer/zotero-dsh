@@ -74,6 +74,11 @@ export interface ZoteroItemSummary {
   source: ZoteroSource
   /** Parent item key when this is a child item. */
   parentItem?: string
+  /**
+   * 调用方给的是附件 key、被自动换成父条目时，原附件 key 落在这里。
+   * 面板选段带的正是 PDF 附件的 key，没有这个字段就没人看得出换过。
+   */
+  attachmentKey?: string
 }
 
 export interface ZoteroItemDetail extends ZoteroItemSummary {

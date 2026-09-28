@@ -604,15 +604,38 @@ export class ZoteroClient {
     }))
     if (src.source === 'none') return src
     try {
-      const itemRes = await this.fetchJson(
+      let itemRes = await this.fetchJson(
         `${src.base}${src.libraryPath}/items/${encodeURIComponent(key)}?format=json`,
         src.headers,
       )
+      /*
+       * 传进来的 key 可能是**附件**而不是条目 —— Zotero 阅读器的 selection 事件给的
+       * 是 PDF 那个 attachment 的 itemID，而用户和模型嘴里的「这篇论文」指的是父条目。
+       * 直接照着附件答，标题会变成文件名、摘要为空、读全文也没有条目可挂。
+       * 所以这里跟一步 parentItem：拿到条目再往下走，附件本身留作 attachmentKey。
+       */
+      let resolvedFromAttachment = ''
+      const firstData = (itemRes.json as RawItem)?.data ?? {}
+      const parentKey = typeof firstData.parentItem === 'string' ? firstData.parentItem : ''
+      if (firstData.itemType === 'attachment' && parentKey) {
+        resolvedFromAttachment = String(firstData.key ?? key)
+        itemRes = await this.fetchJson(
+          `${src.base}${src.libraryPath}/items/${encodeURIComponent(parentKey)}?format=json`,
+          src.headers,
+        )
+      }
+      const effectiveKey = resolvedFromAttachment
+        ? parentKey
+        : key
       const childRes = await this.fetchJson(
-        `${src.base}${src.libraryPath}/items/${encodeURIComponent(key)}/children?format=json&limit=100`,
+        `${src.base}${src.libraryPath}/items/${encodeURIComponent(effectiveKey)}/children?format=json&limit=100`,
         src.headers,
       )
       const summary = toSummary(itemRes.json as RawItem, src.source)
+      if (resolvedFromAttachment) {
+        // 让调用方看得见这次换过 key —— 面板里的 key 和真实条目对不上时全靠这行。
+        summary.attachmentKey = resolvedFromAttachment
+      }
       const children: RawItem[] = Array.isArray(childRes.json) ? childRes.json : []
       const attachments: ZoteroAttachment[] = []
       const notes: { key: string; note: string; title: string }[] = []

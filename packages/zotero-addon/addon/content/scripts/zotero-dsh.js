@@ -641,8 +641,21 @@ var ZoteroDSH = {
           const page = String(annotation.pageLabel || "");
           const reader = event.reader;
           const itemID = reader && reader.itemID;
-          const item = itemID ? Zotero.Items.get(itemID) : null;
-          const itemKey = item ? String(item.key || "") : "";
+          let item = itemID ? Zotero.Items.get(itemID) : null;
+          if (!item) { this.diag("selection: no item for reader itemID"); return; }
+          /*
+           * reader.itemID 指的是**正在阅读的那个 PDF 附件**，不是论文条目本身。
+           * 以前直接把它的 key 送出去，于是选段里写的是附件 key —— 模型拿去
+           * zotero_get_item 只会得到「条目不存在」，白跑两轮。这里换成父条目，
+           * 附件 key 另存一栏，需要精确定位到哪个 PDF 时还有得用。
+           */
+          const attachmentKey = String(item.key || "");
+          try {
+            if (typeof item.isAttachment === "function" && item.isAttachment() && item.parentItem) {
+              item = item.parentItem;
+            }
+          } catch (e) { /* 取不到父条目就用附件本身 */ }
+          const itemKey = String(item.key || "");
           if (!itemKey) { this.diag("selection: no itemKey for reader item"); return; }
 
           // Zotero 没有行号。能给的最接近定位是「页码 + 页内矩形」：
@@ -658,7 +671,7 @@ var ZoteroDSH = {
             btn.addEventListener("click", (ev) => {
               ev.preventDefault();
               ev.stopPropagation();
-              this.sendQuote({ itemKey, page, text, ask, locator });
+              this.sendQuote({ itemKey, attachmentKey, page, text, ask, locator });
             });
             return btn;
           };
