@@ -536,8 +536,12 @@ export async function openPaperChatSession(
 ): Promise<{ ok: boolean; sessionId?: string; seq?: number; chars?: number; error?: string; cwd?: string; isNew?: boolean }> {
   const agents = agentsOf(deps)
   if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
-  const itemKey = String(body.itemKey ?? '')
+  let itemKey = String(body.itemKey ?? '')
   if (!itemKey) return { ok: false, error: '需要 itemKey' }
+  try {
+    const normalized = await deps.client.scoped().getItem(itemKey)
+    if (normalized.found && normalized.item?.key) itemKey = normalized.item.key
+  } catch { /* 下游会给出原始 key 的具体错误 */ }
   const title = String(body.title ?? '') || itemKey
   const store = readChatStore()
   let conv: ChatConv | undefined
@@ -1452,7 +1456,7 @@ async function resolvePaperDir(
   deps: PanelApiDeps,
   itemKey: string,
   rootOverride?: unknown,
-): Promise<{ ok: true; dir: string; title: string; pdfTitle: string } | { ok: false; error: string; title?: string }> {
+): Promise<{ ok: true; dir: string; title: string; pdfTitle: string; itemKey: string } | { ok: false; error: string; title?: string }> {
   const got = await deps.client.scoped().getItem(itemKey)
   if (!got.found || !got.item) return { ok: false, error: `条目不存在: ${itemKey}` }
   const it = got.item
@@ -1479,7 +1483,7 @@ async function resolvePaperDir(
   } catch (err: unknown) {
     return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
   }
-  return { ok: true, dir, title: String(it.title || itemKey), pdfTitle: pdf.title || pdf.filename || '' }
+  return { ok: true, dir, title: String(it.title || itemKey), pdfTitle: pdf.title || pdf.filename || '', itemKey: String(it.key || itemKey) }
 }
 
 async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>) {
@@ -1518,12 +1522,13 @@ async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>)
  * （`~5B66` 这类），反推规则等于把一个内部实现抄进插件，早晚会错。
  */
 async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown>) {
-  const itemKey = String(body.itemKey ?? '').trim()
+  let itemKey = String(body.itemKey ?? '').trim()
   if (!itemKey) return { ok: false, error: '缺少 itemKey' }
 
   const resolved = await resolvePaperDir(deps, itemKey, body.root)
   if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
-  const { dir, title } = resolved
+  const { dir, title, itemKey: canonicalItemKey } = resolved
+  itemKey = canonicalItemKey
 
   // 工作区先落地：没有它，下面建出来的会话就没有归属，侧栏里会掉进「未分组」。
   const api = workspaceApiOf(deps)
@@ -1551,12 +1556,20 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
       | { list?(opts?: { signal?: AbortSignal }): Promise<readonly { header: { id?: unknown; cwd?: unknown; createdAt?: unknown } }[]> }
       | undefined
     const all = (await sp?.list?.({ signal: AbortSignal.timeout(8000) })) ?? []
+    const paperPrefix = `zotero-paper-${itemKey}`
     for (const snap of all) {
       const h = snap?.header
       if (!h) continue
       const id = String(h.id ?? '')
       if (!id || !h.cwd) continue
       if (normPath(String(h.cwd)) !== wanted) continue
+      /*
+       * 只复用这篇论文自己的会话，不复用工作区里一个泛用聊天。
+       * 泛用聊天的 cwd 也许是对的，但它的历史上下文可能属于上一篇论文，
+       * 正是「顶部当前论文对了，具体会话里提示词还是上一篇」的来源。
+       * zotero-paper-<itemKey>[-N] 是本插件的论文会话命名空间；没有就新建。
+       */
+      if (id !== paperPrefix && !id.startsWith(paperPrefix + '-')) continue
       const at = Number(h.createdAt ?? 0)
       if (!found || at > found.createdAt) found = { id, createdAt: at }
     }
@@ -1566,12 +1579,18 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
 
   let sessionId = found?.id ?? ''
   let created = false
+  let contextInjectedAt = 0
+  let agent: AgentLike | undefined
   if (!sessionId) {
     // 没有就建。id 用 zotero-paper-<itemKey>，和面板「对话」tab 那套保持一致，
     // 这样同一条论文不会因为入口不同攒出两个会话。
     sessionId = `zotero-paper-${itemKey}`
     try {
-      await ensureLiveAgent(deps, sessionId, dir, workspaceId || undefined)
+      agent = await ensureLiveAgent(deps, sessionId, dir, workspaceId || undefined)
+      const built = await buildPaperContext(deps, { itemKey, mode: 'meta' })
+      if (!built.ok) return { ok: false, error: built.error ?? '构建论文上下文失败' }
+      injectTextResilient(agent, built.text, deps, sessionId)
+      contextInjectedAt = Date.now()
       created = true
     } catch (err: unknown) {
       return { ok: false, error: '建会话失败：' + String((err as Error)?.message ?? err) }
@@ -1588,11 +1607,43 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
      * 对已存在的会话是 adopt 语义（幂等），传 workspaceId 时它自己会 attachSession。
      */
     try {
-      await ensureLiveAgent(deps, sessionId, dir, workspaceId)
+      agent = await ensureLiveAgent(deps, sessionId, dir, workspaceId)
       console.log(`[dsh-zotero] open-session attach via controller ok (${sessionId})`)
     } catch (err: unknown) {
       console.log(`[dsh-zotero] open-session attach failed: ${String((err as Error)?.message ?? err)}`)
     }
+  }
+
+  const chatStore = readChatStore()
+  const known = chatStore.conversations.find((c) => c.kind === 'paper' && c.itemKey === itemKey && c.sessionId === sessionId)
+  /*
+   * 关键：复用会话不等于复用它当前的论文上下文。早期版本曾经把上一篇论文
+   * 注入进同一个 session，之后只要复用它，历史提示词就一直带着上一篇。
+   * chat store 没登记，或登记但 injectedAt=0，都重新注入一次当前条目的 meta；
+   * 之后同一篇正常复用，不会每次点击都重复塞上下文。
+   */
+  if (agent && (!known || !known.injectedAt)) {
+    try {
+      const built = await buildPaperContext(deps, { itemKey, mode: 'meta' })
+      if (built.ok) {
+        injectTextResilient(agent, built.text, deps, sessionId)
+        contextInjectedAt = Date.now()
+      }
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] refresh paper context failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+  const now = Date.now()
+  if (!known) {
+    const seqMatch = sessionId.match(new RegExp(`^zotero-paper-${itemKey}(?:-(\\d+))?$`))
+    const seq = seqMatch ? Number(seqMatch[1] || '1') : 1
+    chatStore.conversations.push({ kind: 'paper', itemKey, title, sessionId, seq, injectedAt: contextInjectedAt, at: now })
+    writeChatStore(chatStore)
+  } else if (contextInjectedAt) {
+    known.title = title
+    known.injectedAt = contextInjectedAt
+    known.at = now
+    writeChatStore(chatStore)
   }
 
   pendingOpenSessionId = sessionId

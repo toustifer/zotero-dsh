@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero DSH",
-  "version": "0.18.8",
+  "version": "0.18.9",
   "description": "在 Zotero 中嵌入 DeepSeek Harness 对话面板",
   "author": "Fisfzy",
   "homepage_url": "https://github.com/Fisfzy/zotero-dsh",
