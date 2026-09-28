@@ -375,14 +375,21 @@ async function ensureLiveAgent(
   deps: PanelApiDeps,
   sessionId: string,
   cwd?: string,
+  workspaceId?: string,
 ): Promise<AgentLike> {
   const agents = agentsOf(deps)
   const sc = deps.sessionController as
-    | { create?(req: { sessionId: string; cwd?: string }): Promise<unknown> }
+    | { create?(req: { sessionId: string; cwd?: string; workspaceId?: string }): Promise<unknown> }
     | undefined
   if (sc?.create) {
     try {
-      await sc.create({ sessionId, ...(cwd ? { cwd } : {}) })
+      /*
+       * 传 workspaceId 而不是 cwd —— sessionController.create 只在拿到 workspaceId 时
+       * 才会调 workspace.attachSession()。只给 cwd 的话会话 header 里 cwd 是对的，
+       * 但它不在任何工作区的 sessionIds 里，侧栏不显示、界面还会停在「选择工作区」。
+       * 两者不能同时传（gateway/bad-request）。
+       */
+      await sc.create(workspaceId ? { sessionId, workspaceId } : { sessionId, ...(cwd ? { cwd } : {}) })
     } catch (err: unknown) {
       console.log(`[dsh-zotero] sessionController.create failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
     }
@@ -1564,10 +1571,27 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
     // 这样同一条论文不会因为入口不同攒出两个会话。
     sessionId = `zotero-paper-${itemKey}`
     try {
-      await ensureLiveAgent(deps, sessionId, dir)
+      await ensureLiveAgent(deps, sessionId, dir, workspaceId || undefined)
       created = true
     } catch (err: unknown) {
       return { ok: false, error: '建会话失败：' + String((err as Error)?.message ?? err) }
+    }
+  }
+
+  // 已经存在的会话也要补挂一次：早先的会话只带了 cwd、没进任何工作区的 sessionIds，
+  // 于是侧栏看不到它、切过去也停在「选择工作区」。attachSession 对已挂的是幂等的。
+  if (!created && workspaceId) {
+    /*
+     * 走 sessionController.create 而不是自己去 workspaceController 上找实体：
+     * controller 只暴露 create/rename/delete/insertBefore/follow，没有 get，
+     * 拿不到那个 workspace 就没法调 attachSession。而 sessionController.create
+     * 对已存在的会话是 adopt 语义（幂等），传 workspaceId 时它自己会 attachSession。
+     */
+    try {
+      await ensureLiveAgent(deps, sessionId, dir, workspaceId)
+      console.log(`[dsh-zotero] open-session attach via controller ok (${sessionId})`)
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] open-session attach failed: ${String((err as Error)?.message ?? err)}`)
     }
   }
 

@@ -221,6 +221,23 @@ var ZoteroDSH = {
     return { base, token, savedUrl: saved || null };
   },
 
+  /**
+   * resolveDSHUrl 的短期缓存。
+   *
+   * 切换论文会重建整个 pane，每次都要读一遍日志尾部取 token。日志可能几 MB，
+   * 而 token 在一次实例生命周期里是不变的 —— 缓存 30 秒，恰好覆盖"连续切几篇"
+   * 这个真实场景，又不会把重启后的新 token 拖太久。
+   */
+  async resolveDSHUrlCached() {
+    const now = Date.now();
+    if (this._urlCache && this._urlCache.value && now - this._urlCache.at < 30000) {
+      return this._urlCache.value;
+    }
+    const v = await this.resolveDSHUrl();
+    if (v) this._urlCache = { value: v, at: now };
+    return v;
+  },
+
   async resolveDSHUrl() {
     const { base, token, savedUrl } = await this.resolveParts();
     if (token) return this.appendToken(base, token);
@@ -337,8 +354,15 @@ var ZoteroDSH = {
     br.setAttribute("style", "display:block;flex:1 1 auto;width:100%;height:72vh;min-height:420px;border:0;background:#fff;");
     br.setAttribute("data-zotero-dsh-embed", "1");
     holder.appendChild(br);
-    // 等 custom element 完成 construct，browsingContext 才可用
-    await new Promise((r) => setTimeout(r, 500));
+    /*
+     * 等 custom element 完成 construct，browsingContext 才可用。
+     * 以前是一刀切 sleep(500)，而实测通常几十毫秒就绪了 —— 切换论文时这段
+     * 是纯白等。改成每 20ms 探一次，最多 1s。
+     */
+    for (let i = 0; i < 50; i += 1) {
+      if (br.browsingContext && br.browsingContext.currentWindowGlobal) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     if (stale()) {
       try { br.remove(); } catch (e) {}
       this.diag("embed gen=" + gen + " superseded before load");
@@ -507,7 +531,7 @@ var ZoteroDSH = {
       try { this.unmountEmbedded(doc); } catch (e) {}
       holder.textContent = "";
       let u = null;
-      try { u = await this.resolveDSHUrl(); } catch (e) { this.diag("resolve failed: " + e); }
+      try { u = await this.resolveDSHUrlCached(); } catch (e) { this.diag("resolve failed: " + e); }
       if (!u) {
         status.textContent = "未配置地址";
         try { urlIn.value = ""; } catch (e) {}
