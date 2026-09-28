@@ -323,7 +323,11 @@ var ZoteroDSH = {
    *      直接调 browser.loadURI() 会 NS_ERROR_FAILURE
    * 这是 Zotero 自家 HiddenBrowser 的做法（chrome/content/zotero/HiddenBrowser.mjs）。
    */
-  async mountEmbedded(doc, holder, url) {
+  async mountEmbedded(doc, holder, url, gen) {
+    // 每次 load() 递增一个代号。Zotero 会在条目切换、面板重排时反复调 renderPane，
+    // 于是可能有两个 load 同时在跑；旧的必须自己在每个 await 点退场 —— 否则它会
+    // 把后来者建的 browser 从 holder 里挤掉，两边都拿不到标题，状态栏永远停在"加载中"。
+    const stale = () => gen !== undefined && this._embedGen !== gen;
     const br = doc.createXULElement("browser");
     br.setAttribute("type", "content");
     br.setAttribute("remote", "true");
@@ -335,6 +339,11 @@ var ZoteroDSH = {
     holder.appendChild(br);
     // 等 custom element 完成 construct，browsingContext 才可用
     await new Promise((r) => setTimeout(r, 500));
+    if (stale()) {
+      try { br.remove(); } catch (e) {}
+      this.diag("embed gen=" + gen + " superseded before load");
+      return { ok: false, stale: true };
+    }
     const bc = br.browsingContext;
     if (!bc || !bc.currentWindowGlobal) {
       this.diag("embed: browsingContext not ready");
@@ -382,6 +391,11 @@ var ZoteroDSH = {
       lastTitle = title;
       this.diag("embed probe#" + attempt + " title=" + JSON.stringify(title)
         + " uri=" + String(cur).replace(/token=[^&]*/, "token=***"));
+      if (stale()) {
+        try { br.remove(); } catch (e) {}
+        this.diag("embed gen=" + gen + " superseded during probe");
+        return { ok: false, stale: true };
+      }
       if (title && !isFailed(title)) break;
       if (isFailed(title)) {
         // 实例多半还在重启：重新读一次 token（重启会换），再导航。
@@ -487,6 +501,9 @@ var ZoteroDSH = {
     body.appendChild(wrap);
 
     const load = async () => {
+      // 发号：谁最后发的号谁说了算，之前的那些一律作废。
+      const gen = (this._embedGen = (this._embedGen || 0) + 1);
+      const superseded = () => this._embedGen !== gen;
       try { this.unmountEmbedded(doc); } catch (e) {}
       holder.textContent = "";
       let u = null;
@@ -499,7 +516,9 @@ var ZoteroDSH = {
       }
       try { urlIn.value = u; } catch (e) {}
       status.textContent = "加载中...";
-      const r = await this.mountEmbedded(doc, holder, u);
+      const r = await this.mountEmbedded(doc, holder, u, gen);
+      // 作废的那次不许写状态：它会把后来者刚写好的「已连接」盖成「加载中」。
+      if (superseded() || r.stale) return;
       status.textContent = r.ok ? "已连接" : ("加载失败: " + (r.error || "unknown"));
     };
 
