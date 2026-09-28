@@ -428,11 +428,22 @@ async function ensureLiveAgent(
   throw new Error(`文献会话激活失败: ${sessionId}`)
 }
 
+/**
+ * 把一段 plugin 上下文注入会话。
+ *
+ * 必须用 createUserMessage 造完整的 UserMessage —— inject() 的签名就是
+ * `inject(message: UserMessage)`，而要落盘成 user/message 事件，DSH 的校验器
+ * 会检查 role 与 id（见 dsh-session 的 assertMessageEventShape）。早先这里只传了
+ * { content, source }，写出来的事件没有 id 和 role，会话本身当场能用 ——
+ * 但下一次重新加载时整条会被判为 corrupt：
+ *   `session event at seq N lacks an identified message`
+ * 也就是「历史加载失败」。
+ */
 function injectText(agent: AgentLike, text: string): void {
-  agent.inject({
+  agent.inject(createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: PLUGIN_ID },
-  })
+  }))
 }
 
 /**
@@ -2236,10 +2247,10 @@ async function injectContext(deps: PanelApiDeps, body: Record<string, unknown>) 
     return { ok: false, error: '无法定位会话 agent（sessionId 无效或会话未激活）', chars: built.chars }
   }
   try {
-    agent.inject({
+    agent.inject(createUserMessage({
       content: [{ type: 'text', text: built.text }],
       source: { kind: 'plugin', plugin: PLUGIN_ID },
-    })
+    }))
     return { ok: true, chars: built.chars, sessionId }
   } catch (err: any) {
     return { ok: false, error: String(err?.message ?? err), chars: built.chars }
@@ -2259,10 +2270,10 @@ async function startRead(deps: PanelApiDeps, body: Record<string, unknown>) {
     return { ok: false, error: '无法定位会话 agent（sessionId 无效或会话未激活）', chars: built.chars }
   }
   try {
-    agent.inject({
+    agent.inject(createUserMessage({
       content: [{ type: 'text', text: built.text }],
       source: { kind: 'plugin', plugin: PLUGIN_ID },
-    })
+    }))
     if (typeof agent.followup === 'function') {
       agent.followup(
         createUserMessage({
