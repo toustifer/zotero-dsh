@@ -378,6 +378,21 @@ async function ensureLiveAgent(
   workspaceId?: string,
 ): Promise<AgentLike> {
   const agents = agentsOf(deps)
+
+  /*
+   * 已经有 live agent、又不需要挂工作区时直接返回，根本不碰 controller。
+   *
+   * controller.create 对已存在的会话会 observe 持久化头再比对 cwd，而它在没有
+   * workspaceId 时用的是 defaultCwd（= DSH_HOME）当请求值 —— 于是任何 cwd
+   * 不等于 DSH_HOME 的会话（本插件的论文会话全部如此）都会抛
+   * ApiSessionCwdConflict。之前每一次 Zotero 选段引用都会撞一次：日志刷满，
+   * 装配还白跑。见 dsh-api-session-controller 的 createOrAdopt。
+   */
+  if (!workspaceId) {
+    const already = agents?.get(sessionId)
+    if (already) { grantFullAccess(deps, already); restrictTools(already); return already }
+  }
+
   const sc = deps.sessionController as
     | { create?(req: { sessionId: string; cwd?: string; workspaceId?: string }): Promise<unknown> }
     | undefined
@@ -388,8 +403,19 @@ async function ensureLiveAgent(
        * 才会调 workspace.attachSession()。只给 cwd 的话会话 header 里 cwd 是对的，
        * 但它不在任何工作区的 sessionIds 里，侧栏不显示、界面还会停在「选择工作区」。
        * 两者不能同时传（gateway/bad-request）。
+       *
+       * 没有 workspaceId 时，cwd 必须用会话**自己**记录的那个：给 defaultCwd 会撞
+       * 上面的 ApiSessionCwdConflict，不给等于给 defaultCwd。只有会话还没有持久化头
+       * （真的是新建）时才轮到调用方传的 cwd。
        */
-      await sc.create(workspaceId ? { sessionId, workspaceId } : { sessionId, ...(cwd ? { cwd } : {}) })
+      let request: { sessionId: string; cwd?: string; workspaceId?: string }
+      if (workspaceId) {
+        request = { sessionId, workspaceId }
+      } else {
+        const effective = (await persistedCwdOf(deps, sessionId)) ?? cwd
+        request = { sessionId, ...(effective ? { cwd: effective } : {}) }
+      }
+      await sc.create(request)
     } catch (err: unknown) {
       console.log(`[dsh-zotero] sessionController.create failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
     }
@@ -535,6 +561,29 @@ async function parentCwdOf(deps: PanelApiDeps, body: Record<string, unknown>): P
       | undefined
     const inspected = await persistence?.inspect?.(parent)
     if (inspected?.meta?.cwd) return inspected.meta.cwd
+  } catch { /* fall through */ }
+  return undefined
+}
+
+/**
+ * 一个会话持久化头里记的 cwd。
+ *
+ * 存在的理由是 sessionController.create 的 adopt 语义：已存在的会话必须用**它自己**
+ * 的 cwd 去 adopt，否则抛 ApiSessionCwdConflict（见 ensureLiveAgent 的注释）。
+ * 没有 workspaceId 可传的调用点因此都得先问这里。会话还没落盘时返回 undefined，
+ * 由调用方决定新建的 cwd。
+ */
+async function persistedCwdOf(deps: PanelApiDeps, sessionId: string): Promise<string | undefined> {
+  try {
+    const cwd = agentsOf(deps)?.get(sessionId)?.session?.header?.cwd
+    if (cwd) return String(cwd)
+  } catch { /* fall through */ }
+  try {
+    const persistence = deps.sessionPersistence as
+      | { inspect?(id: string): Promise<{ meta?: { cwd?: string } } | undefined> }
+      | undefined
+    const inspected = await persistence?.inspect?.(sessionId)
+    if (inspected?.meta?.cwd) return String(inspected.meta.cwd)
   } catch { /* fall through */ }
   return undefined
 }

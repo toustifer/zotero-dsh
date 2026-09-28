@@ -47,7 +47,9 @@ if [ -n "$PLUGIN_DIR" ]; then
   STAGING="$PLUGIN_DIR"
   say "using prebuilt package at $STAGING"
 else
-  TGZ="$(ls -1 "$HERE"/dsh-zotero-*.tgz 2>/dev/null | head -n 1 || true)"
+  # Newest wins: several releases can sit side by side, and a bare head -n 1 would
+  # pick whichever the shell happens to list first.
+  TGZ="$(ls -1 "$HERE"/dsh-zotero-*.tgz 2>/dev/null | sort -V | tail -n 1 || true)"
   [ -n "$TGZ" ] || die "no dsh-zotero-*.tgz next to this script; pass --plugin-dir instead"
   STAGING="$(mktemp -d)"
   tar -xzf "$TGZ" -C "$STAGING"
@@ -143,6 +145,22 @@ if [ -f "$PRESET_SRC/agent.cordis.yml" ]; then
   fi
 else
   say "no presets/research in the package — skipping the agent preset"
+fi
+
+# ---- 6. install the session-log healer --------------------------------------
+# DSH validates every session log's first Zstd frame when it scans the session
+# store at boot, and fails closed: one half-written header frame — what an
+# interrupted write leaves — takes down the whole plugin tree, and the Web GUI
+# then reports "Failed to load plugins". This sweep quarantines such a log
+# before DSH ever sees it. Run it from whatever starts this instance.
+HEALER_SRC="$HERE/heal-sessions.cjs"
+if [ -f "$HEALER_SRC" ]; then
+  HEALER_DST="$DSH_HOME/heal-sessions.cjs"
+  cp -f "$HEALER_SRC" "$HEALER_DST"
+  say "session healer -> $HEALER_DST"
+  say "  call it before starting DSH, e.g.: node \"$HEALER_DST\""
+else
+  say "no heal-sessions.cjs next to this script — skipping the session healer"
 fi
 
 echo

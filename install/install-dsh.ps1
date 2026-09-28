@@ -37,7 +37,10 @@ if ($PluginDir -ne '') {
   $staging = $PluginDir
   Say "using prebuilt package at $staging"
 } else {
-  $tgz = Get-ChildItem -Path $here -Filter 'dsh-zotero-*.tgz' -ErrorAction SilentlyContinue | Select-Object -First 1
+  # Newest wins: several releases can sit side by side, and a bare -First 1 would
+  # pick whichever the filesystem happens to list first.
+  $tgz = Get-ChildItem -Path $here -Filter 'dsh-zotero-*.tgz' -ErrorAction SilentlyContinue |
+    Sort-Object { [version]($_.BaseName -replace '^dsh-zotero-', '') } -Descending | Select-Object -First 1
   if (-not $tgz) { Die "no dsh-zotero-*.tgz next to this script; pass -PluginDir instead" }
   $staging = Join-Path $env:TEMP ('dsh-zotero-unpack-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
   New-Item -ItemType Directory -Force -Path $staging | Out-Null
@@ -92,9 +95,9 @@ if ($existing -match [regex]::Escape($anchor)) {
 # ---- 5. install the research agent preset -----------------------------------
 # 预设放在 DSH 的用户根下，是给人改的东西 —— 已经存在就不覆盖。
 # 缺了它，工具照常可用，但模型不会按文献工作的纪律去用它们。
-$presetSrc = Join-Path $staging 'presetsesearch'
+$presetSrc = Join-Path $staging 'presets\research'
 if (Test-Path (Join-Path $presetSrc 'agent.cordis.yml')) {
-  $presetDst = Join-Path $DshHome '.agent-presetsesearch'
+  $presetDst = Join-Path $DshHome '.agent-presets\research'
   if (Test-Path $presetDst) {
     Say "preset already at $presetDst -- left untouched (yours wins)"
   } else {
@@ -104,6 +107,22 @@ if (Test-Path (Join-Path $presetSrc 'agent.cordis.yml')) {
   }
 } else {
   Say "no presets\research in the package -- skipping the agent preset"
+}
+
+# ---- 6. install the session-log healer --------------------------------------
+# DSH validates every session log's first Zstd frame when it scans the session
+# store at boot, and fails closed: one half-written header frame -- what an
+# interrupted write leaves -- takes down the whole plugin tree, and the Web GUI
+# then reports "Failed to load plugins". This sweep quarantines such a log
+# before DSH ever sees it. Run it from whatever starts this instance.
+$healerSrc = Join-Path $here 'heal-sessions.cjs'
+if (Test-Path $healerSrc) {
+  $healerDst = Join-Path $DshHome 'heal-sessions.cjs'
+  Copy-Item $healerSrc $healerDst -Force
+  Say "session healer -> $healerDst"
+  Say "  call it before starting DSH, e.g.: node ""$healerDst"""
+} else {
+  Say "no heal-sessions.cjs next to this script -- skipping the session healer"
 }
 
 Say ''
