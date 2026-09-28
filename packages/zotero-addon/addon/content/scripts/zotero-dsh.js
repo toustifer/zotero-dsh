@@ -451,10 +451,17 @@ var ZoteroDSH = {
     // 为当前论文开一个工作区：记录与复现的落脚点。有 PDF 才建得出来。
     const wsRow = el("div", "display:flex;align-items:center;gap:6px;flex:0 0 auto;");
     const wsBtn = el("button", "font:10px system-ui;padding:2px 8px;border-radius:4px;cursor:pointer;", "为这篇论文建工作区");
+    // 打开会话：直接跳到这篇论文的工作区里最近用过的会话，没有就现建一个。
+    // 比「先建工作区、再去侧栏里翻出那个工作区、再点会话」少三步。
+    const openBtn = el("button", "font:10px system-ui;padding:2px 8px;border-radius:4px;cursor:pointer;", "打开会话");
+    openBtn.setAttribute("title", "跳到这篇论文工作区里最近用过的会话；没有就新建一个");
     const wsState = el("span", "font:10px system-ui;opacity:.65;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "");
     wsBtn.addEventListener("click", () => this.makePaperWorkspace());
+    openBtn.addEventListener("click", () => this.openPaperSession());
+    wsRow.appendChild(openBtn);
     wsRow.appendChild(wsBtn);
     wsRow.appendChild(wsState);
+    this._openBtn = openBtn;
     this._paperWsBtn = wsBtn;
     this._paperWsState = wsState;
     wrap.appendChild(wsRow);
@@ -943,6 +950,45 @@ var ZoteroDSH = {
       this.diag("paper ws failed: " + e);
       if (!silent && this._paperWsState) this._paperWsState.textContent = "请求失败";
       return null;
+    }
+  },
+
+  /**
+   * 打开这篇论文的会话：host 侧找该论文工作区里最近用过的那个，
+   * 没有就建一个；真正把界面切过去由 DSH 前端轮询 /pending-open 完成。
+   *
+   * 这里不需要知道会话 id 怎么用 —— Zotero 是另一个进程，够不到浏览器，
+   * 只能把意图交给服务端，再由页面自己执行。
+   */
+  async openPaperSession() {
+    const key = this._currentPaperKey;
+    const btn = this._openBtn;
+    if (!key) { this.notify("先选中一篇论文"); return; }
+    if (btn) btn.disabled = true;
+    try {
+      let url = null;
+      try { url = await this.apiUrl("/@dsh-external/dsh-zotero/api/papers/open-session"); } catch (e) {}
+      if (!url) { this.notify("DSH 地址未就绪"); return; }
+      const xhr = await Zotero.HTTP.request("POST", url, {
+        body: JSON.stringify({ itemKey: key }),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 60000,
+      });
+      const data = (xhr && xhr.response) || null;
+      this.diag("open-session key=" + key + " status=" + (xhr ? xhr.status : "?")
+        + " ok=" + !!(data && data.ok) + " sid=" + ((data && data.sessionId) || "-")
+        + (data && data.error ? " err=" + data.error : ""));
+      if (data && data.ok) {
+        this.notify(data.reused ? "已切到这篇的会话" : "已新建这篇的会话");
+      } else {
+        this.notify("打开会话失败：" + String((data && data.error) || "unknown").slice(0, 80));
+      }
+    } catch (e) {
+      this.diag("open-session failed: " + e);
+      this.notify("打开会话失败：" + String(e).slice(0, 80));
+    } finally {
+      if (btn) btn.disabled = false;
     }
   },
 

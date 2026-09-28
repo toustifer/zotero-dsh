@@ -18,6 +18,11 @@ type ClientContext = {
   slots: SlotsService
   sessions: {
     create(opts?: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+    /**
+     * 把界面切到某个会话（DSH 客户端 sessions 服务的能力，和点侧栏会话行同一条路）。
+     * Zotero 那边点「打开会话」时，服务端只存了一个 id，真正跳转要靠这里。
+     */
+    open(id: string): void
     list: {
       getSnapshot(): { byId: Record<string, { cwd?: string }> }
     }
@@ -632,6 +637,38 @@ export function apply(ctx: ClientContext): void {
       return null
     }
   }
+
+  /*
+   * 待开会话轮询：Zotero 面板上的「打开会话」按钮只能通过 HTTP 告诉服务端
+   * 它想切到哪个 session，而切换界面是浏览器侧的能力。这条路复用选段卡那套
+   * 轮询 —— Zotero 是另一个进程，没有推送通道。
+   *
+   * 只在文档可见时轮询：这个页面常年挂在 Zotero 侧栏里，切到后台还每 2 秒打
+   * 一次自己的 HTTP，纯属浪费。
+   */
+  ctx.effect(() => {
+    let stopped = false
+    let timer = 0
+    const tick = async (): Promise<void> => {
+      if (stopped) return
+      try {
+        if (document.visibilityState === 'visible') {
+          const r = await fetch(`${API}/pending-open`)
+          const j = (await r.json()) as { sessionId?: string | null }
+          const id = String(j?.sessionId ?? '')
+          if (id) SESSIONS?.open(id)
+        }
+      } catch {
+        /* host 没起来时静默重试 */
+      }
+      if (!stopped) timer = window.setTimeout(() => void tick(), 2000)
+    }
+    void tick()
+    return () => {
+      stopped = true
+      window.clearTimeout(timer)
+    }
+  }, '@dsh-external/dsh-zotero: pending session open')
 
   // 选段卡挂在 composer 上方：Zotero 送进来的那段话，点一下经 setDraft 追加进草稿。
   ctx.effect(() => {

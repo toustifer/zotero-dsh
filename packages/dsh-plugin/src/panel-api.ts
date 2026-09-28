@@ -120,6 +120,22 @@ export function currentFocus(): FocusState | null {
   return lastFocus
 }
 
+/**
+ * 待打开的会话：Zotero 那边点了「打开会话」，但这个请求只能告诉**服务端**会话是谁；
+ * 真正把界面切过去要用浏览器里的 sessions.open()。所以服务端存一下，前端轮询取走。
+ *
+ * 只留一个：这是一次点击的一次跳转，不是队列。取走即清 —— 否则下次任何一次轮询
+ * 都会把用户从当前会话里再拽出去一次。
+ */
+let pendingOpenSessionId: string | null = null
+
+/** 供前端轮询：拿到就清。 */
+export function takePendingOpen(): string | null {
+  const id = pendingOpenSessionId
+  pendingOpenSessionId = null
+  return id
+}
+
 /** 渲染成注入给模型的运行时上下文；没选中时返回空串（空文本会被组装层丢掉）。 */
 export function focusContextText(): string {
   const f = lastFocus
@@ -842,6 +858,8 @@ async function handle(
       }
       // 当前选中的论文。GET 给面板自检用，POST 由 Zotero 半边在选中变化时推上来。
       if (path === '/focus') return send(res, 200, { ok: true, focus: currentFocus() })
+      // 前端轮询这个：有值就切过去，取走即清。
+      if (path === '/pending-open') return send(res, 200, { ok: true, sessionId: takePendingOpen() })
       if (path === '/map') return send(res, 200, projectSnapshot())
       if (path === '/map/workspaces') {
         const list = await listHostWorkspaces(deps)
@@ -957,6 +975,7 @@ async function handle(
       if (path === '/collections/sync') return send(res, 200, await syncCollections(deps, body))
       // 单篇论文（有 PDF）→ 记录与复现用的工作区
       if (path === '/papers/workspace') return send(res, 200, await paperWorkspace(deps, body))
+      if (path === '/papers/open-session') return send(res, 200, await openPaperSession(deps, body))
       // Idea 研究区：init / create / list
       if (path === '/ideas') return send(res, 200, await ideasZone(deps, body))
       // 两个分区的相对位置：把谁放到最前，就是谁当主视图
@@ -1415,19 +1434,25 @@ function mirrorDirs(
  * 位置是「论文所属集合的镜像目录 / 论文标题」。只对有 PDF 的条目开：没有全文的话
  * 这个目录只是个空壳，既没法记也没法复现。没有集合归属的落到根下的 _未分类。
  */
-async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>) {
-  const itemKey = String(body.itemKey ?? '').trim()
-  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
-  const api = workspaceApiOf(deps)
-  if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
-
+/**
+ * 算一篇论文的工作区目录（不建任何东西）。
+ *
+ * 抽出来是为了让「建工作区」和「打开这篇论文的会话」用同一套落点规则 ——
+ * 两边各算一遍，迟早会在某个集合结构下分叉，然后就出现"工作区在这儿、
+ * 会话在那儿"的错位。
+ */
+async function resolvePaperDir(
+  deps: PanelApiDeps,
+  itemKey: string,
+  rootOverride?: unknown,
+): Promise<{ ok: true; dir: string; title: string; pdfTitle: string } | { ok: false; error: string; title?: string }> {
   const got = await deps.client.scoped().getItem(itemKey)
   if (!got.found || !got.item) return { ok: false, error: `条目不存在: ${itemKey}` }
   const it = got.item
   const pdf = (it.attachments ?? []).find((a) => a.isPdf)
   if (!pdf) return { ok: false, error: '这篇没有 PDF 附件，先加全文再建工作区', title: it.title || itemKey }
 
-  const root = String(body.root ?? '').trim() || defaultCollectionsRoot()
+  const root = String(rootOverride ?? '').trim() || defaultCollectionsRoot()
   let parentDir = join(root, '_未分类')
   try {
     const col = await deps.client.collections()
@@ -1447,18 +1472,108 @@ async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>)
   } catch (err: unknown) {
     return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
   }
+  return { ok: true, dir, title: String(it.title || itemKey), pdfTitle: pdf.title || pdf.filename || '' }
+}
+
+async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const itemKey = String(body.itemKey ?? '').trim()
+  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
+  const api = workspaceApiOf(deps)
+  if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
+
+  const resolved = await resolvePaperDir(deps, itemKey, body.root)
+  if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
+  const { dir, title, pdfTitle } = resolved
 
   try {
     const res = await api.create({ path: dir })
     const wsId = res?.workspace?.workspaceId
     if (typeof wsId !== 'string' || !wsId) return { ok: false, error: 'create 未返回 workspaceId' }
-    try { await api.rename?.({ workspaceId: wsId, title: String(it.title || itemKey).slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
+    try { await api.rename?.({ workspaceId: wsId, title: title.slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
     try { await api.insertBefore?.({ workspaceId: wsId }) } catch { /* 排序失败不阻断 */ }
     console.log(`[dsh-zotero] papers/workspace ${itemKey} -> ${dir}`)
-    return { ok: true, itemKey, path: dir, workspaceId: wsId, created: Boolean(res?.created), pdf: pdf.title || pdf.filename || '' }
+    return { ok: true, itemKey, path: dir, workspaceId: wsId, created: Boolean(res?.created), pdf: pdfTitle }
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
+}
+
+/**
+ * 打开（必要时先建）这篇论文的会话，并让浏览器切过去。
+ *
+ * 「属于这篇论文的工作区」= resolvePaperDir 算出来的那个目录 —— 和
+ * papers/workspace 用的是同一套落点规则，所以两边永远指向同一个地方。
+ * 先把工作区 ensure 出来（create 对已存在的路径是幂等的），再在
+ * sessionPersistence.list() 里挑 cwd 正好等于它的会话，取 createdAt 最新的那个；
+ * 一个都没有就按 zotero-paper-<itemKey> 建一个。
+ *
+ * 用 list() 而不是去猜 sessions/ 下的目录名：那个名字是 cwd 的自定义转义
+ * （`~5B66` 这类），反推规则等于把一个内部实现抄进插件，早晚会错。
+ */
+async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown>) {
+  const itemKey = String(body.itemKey ?? '').trim()
+  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
+
+  const resolved = await resolvePaperDir(deps, itemKey, body.root)
+  if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
+  const { dir, title } = resolved
+
+  // 工作区先落地：没有它，下面建出来的会话就没有归属，侧栏里会掉进「未分组」。
+  const api = workspaceApiOf(deps)
+  let workspaceId = ''
+  let workspaceCreated = false
+  if (api?.create) {
+    try {
+      const res = await api.create({ path: dir })
+      workspaceId = String(res?.workspace?.workspaceId ?? '')
+      workspaceCreated = Boolean(res?.created)
+      if (workspaceId) {
+        try { await api.rename?.({ workspaceId, title: title.slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
+      }
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] open-session workspace ensure failed: ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+
+  // 找这篇论文已有的会话。路径比较统一走 normPath：注册表里存的是反斜杠，
+  // 而 header 里的 cwd 可能是另一侧写的，大小写也不保证一致。
+  const wanted = normPath(dir)
+  let found: { id: string; createdAt: number } | null = null
+  try {
+    const sp = deps.sessionPersistence as
+      | { list?(opts?: { signal?: AbortSignal }): Promise<readonly { header: { id?: unknown; cwd?: unknown; createdAt?: unknown } }[]> }
+      | undefined
+    const all = (await sp?.list?.({ signal: AbortSignal.timeout(8000) })) ?? []
+    for (const snap of all) {
+      const h = snap?.header
+      if (!h) continue
+      const id = String(h.id ?? '')
+      if (!id || !h.cwd) continue
+      if (normPath(String(h.cwd)) !== wanted) continue
+      const at = Number(h.createdAt ?? 0)
+      if (!found || at > found.createdAt) found = { id, createdAt: at }
+    }
+  } catch (err: unknown) {
+    console.log(`[dsh-zotero] open-session list failed: ${String((err as Error)?.message ?? err)}`)
+  }
+
+  let sessionId = found?.id ?? ''
+  let created = false
+  if (!sessionId) {
+    // 没有就建。id 用 zotero-paper-<itemKey>，和面板「对话」tab 那套保持一致，
+    // 这样同一条论文不会因为入口不同攒出两个会话。
+    sessionId = `zotero-paper-${itemKey}`
+    try {
+      await ensureLiveAgent(deps, sessionId, dir)
+      created = true
+    } catch (err: unknown) {
+      return { ok: false, error: '建会话失败：' + String((err as Error)?.message ?? err) }
+    }
+  }
+
+  pendingOpenSessionId = sessionId
+  console.log(`[dsh-zotero] papers/open-session ${itemKey} -> ${sessionId} (created=${created} wsCreated=${workspaceCreated})`)
+  return { ok: true, itemKey, sessionId, dir, workspaceId, created, reused: !created }
 }
 
 /**
