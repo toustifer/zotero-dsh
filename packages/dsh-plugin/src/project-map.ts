@@ -71,6 +71,20 @@ export interface Group {
   kind: GroupKind
   /** 该组对应的工作目录 —— DSH 工作区的落点。空串表示尚未指定。 */
   cwd: string
+  /**
+   * 远程执行目标。
+   *
+   * DSH 的工作区必须是**本地真实目录**，所以远程实验采用「同名锚点」：
+   * cwd 指向本地锚点目录，remote.path 指向远端真实目录，两者**末段名一致**
+   * （jepa-lewm ↔ jepa-lewm），一眼能对上。本地锚点放脚本/笔记/配置，
+   * 真正的算力活经 ssh 打过去跑。
+   */
+  remote?: {
+    /** ssh 别名或 user@host，例如 lab-gpu。 */
+    host: string
+    /** 远端绝对路径，例如 /data/exp/jepa-lewm。 */
+    path: string
+  }
   /** dsh workspaceController 的 id（若已与 GUI 工作区列表绑定）。 */
   workspaceId?: string
   /** 置顶（开发空间与当前主攻组建议置顶）。 */
@@ -112,15 +126,32 @@ export interface ConvBinding {
   at: number
 }
 
+/**
+ * 论文级的复现工作区目标。
+ *
+ * 为什么不挂在 Group 上：一篇论文可能还没归到任何组（用户就是想先把复现目录
+ * 定下来），而"这篇论文的代码放哪"本身是论文的属性，不是某个组视图的属性。
+ * 所以单独一层，key 就是 Zotero itemKey。
+ */
+export interface WorkspaceTargetRecord {
+  itemKey: string
+  /** 显式本地目录。与 remote 互斥，remote 优先。 */
+  dir?: string
+  remote?: { host: string; path: string }
+  at: number
+}
+
 export interface ProjectMap {
   version: 2
   groups: Group[]
   members: Member[]
   edges: PaperEdge[]
   convs: ConvBinding[]
+  /** 论文 → 工作区目标的显式覆盖。空表示全部走默认落点规则。 */
+  targets: WorkspaceTargetRecord[]
 }
 
-const EMPTY: ProjectMap = { version: 2, groups: [], members: [], edges: [], convs: [] }
+const EMPTY: ProjectMap = { version: 2, groups: [], members: [], edges: [], convs: [], targets: [] }
 
 function mapPath(): string {
   return join(resolveCacheDir(currentConfig()), 'project-map.json')
@@ -152,6 +183,10 @@ function normGroup(raw: unknown): Group | undefined {
     name: r.name,
     kind,
     cwd: typeof r.cwd === 'string' ? r.cwd : '',
+    ...(r.remote && typeof (r.remote as Record<string, unknown>).host === 'string'
+      && typeof (r.remote as Record<string, unknown>).path === 'string'
+      ? { remote: { host: String((r.remote as Record<string, unknown>).host), path: String((r.remote as Record<string, unknown>).path) } }
+      : {}),
     ...(typeof r.workspaceId === 'string' ? { workspaceId: r.workspaceId } : {}),
     ...(r.pinned === true ? { pinned: true } : {}),
     ...(typeof r.note === 'string' ? { note: r.note } : {}),
@@ -162,7 +197,7 @@ function normGroup(raw: unknown): Group | undefined {
 
 /** 旧版迁移：v1 的 project 一律当作 research 区的 project 组。 */
 function migrateV1(raw: Record<string, unknown>): ProjectMap {
-  const out: ProjectMap = { version: 2, groups: [], members: [], edges: [], convs: [] }
+  const out: ProjectMap = { version: 2, groups: [], members: [], edges: [], convs: [], targets: [] }
   const idMap = new Map<string, string>()
   const projects = Array.isArray(raw.projects) ? (raw.projects as Record<string, unknown>[]) : []
   for (const p of projects) {
@@ -218,6 +253,19 @@ export function readProjectMap(): ProjectMap {
       members: Array.isArray(raw?.members) ? (raw.members as Member[]) : [],
       edges: Array.isArray(raw?.edges) ? (raw.edges as PaperEdge[]) : [],
       convs: Array.isArray(raw?.convs) ? (raw.convs as ConvBinding[]) : [],
+      targets: Array.isArray(raw?.targets)
+        ? (raw.targets as Record<string, unknown>[])
+            .filter((t) => typeof t?.itemKey === 'string')
+            .map((t) => ({
+              itemKey: String(t.itemKey),
+              ...(typeof t.dir === 'string' && t.dir ? { dir: t.dir } : {}),
+              ...(t.remote && typeof (t.remote as Record<string, unknown>).host === 'string'
+                && typeof (t.remote as Record<string, unknown>).path === 'string'
+                ? { remote: { host: String((t.remote as Record<string, unknown>).host), path: String((t.remote as Record<string, unknown>).path) } }
+                : {}),
+              at: Number(t.at) || Date.now(),
+            }))
+        : [],
     }
   } catch {
     return { ...EMPTY }
@@ -242,6 +290,43 @@ function uniqueGroupId(m: ProjectMap, name: string, ignore?: string): string {
   return id
 }
 
+/** 读一篇论文的显式工作区目标；没设过返回 undefined。 */
+export function getWorkspaceTarget(itemKey: string): WorkspaceTargetRecord | undefined {
+  const m = readProjectMap()
+  return m.targets.find((t) => t.itemKey === itemKey)
+}
+
+/**
+ * 写/清一篇论文的工作区目标。
+ * 传空 dir 且空 remote 视为**清除**，之后该论文回到默认落点规则。
+ */
+export function setWorkspaceTarget(input: {
+  itemKey: string
+  dir?: string
+  remote?: { host: string; path: string } | null
+}): WorkspaceTargetRecord | undefined {
+  const m = readProjectMap()
+  const key = String(input.itemKey || '').trim()
+  if (!key) return undefined
+  const dir = String(input.dir ?? '').trim()
+  const remote = input.remote && input.remote.host && input.remote.path
+    ? { host: String(input.remote.host), path: String(input.remote.path) }
+    : undefined
+
+  m.targets = m.targets.filter((t) => t.itemKey !== key)
+  if (!dir && !remote) { writeProjectMap(m); return undefined }   // 显式清除
+
+  const rec: WorkspaceTargetRecord = {
+    itemKey: key,
+    ...(dir ? { dir } : {}),
+    ...(remote ? { remote } : {}),
+    at: Date.now(),
+  }
+  m.targets.push(rec)
+  writeProjectMap(m)
+  return rec
+}
+
 /** 新建或更新一个组。传 id 即更新；只覆盖显式给出的字段。 */
 export function upsertGroup(input: {
   id?: string
@@ -249,6 +334,7 @@ export function upsertGroup(input: {
   name: string
   kind?: GroupKind
   cwd?: string
+  remote?: { host: string; path: string } | null
   workspaceId?: string
   pinned?: boolean
   note?: string
@@ -262,6 +348,11 @@ export function upsertGroup(input: {
     existing.zone = input.zone
     if (input.kind !== undefined) existing.kind = input.kind
     if (input.cwd !== undefined) existing.cwd = input.cwd
+    // remote 传 null 表示显式清除（退回纯本地），不传则不动。
+    if (input.remote !== undefined) {
+      if (input.remote === null) delete existing.remote
+      else existing.remote = { host: String(input.remote.host), path: String(input.remote.path) }
+    }
     if (input.workspaceId !== undefined) existing.workspaceId = input.workspaceId
     if (input.pinned !== undefined) existing.pinned = input.pinned
     if (input.note !== undefined) existing.note = input.note
@@ -277,6 +368,7 @@ export function upsertGroup(input: {
     name,
     kind,
     cwd: input.cwd ?? '',
+    ...(input.remote ? { remote: { host: String(input.remote.host), path: String(input.remote.path) } } : {}),
     ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
     ...(input.pinned ? { pinned: true } : {}),
     ...(input.note ? { note: input.note } : {}),

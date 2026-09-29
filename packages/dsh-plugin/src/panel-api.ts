@@ -67,6 +67,8 @@ import {
   unbindMember,
   unlinkPapers,
   upsertGroup,
+  getWorkspaceTarget,
+  setWorkspaceTarget,
 } from './project-map.ts'
 
 export const PLUGIN_ID = '@dsh-external/dsh-zotero'
@@ -914,7 +916,7 @@ async function handle(
         return send(res, 200, { conversations: store.conversations })
       }
       // ── M4 论文 ↔ 工作区映射（v2：调研区 / 研究区）──
-      if (path === '/quote/latest') {
+if (path === '/quote/latest') {
         // 刻意不按 sessionId 过滤：选段是在 Zotero 阅读器里产生的，和用户此刻在 DSH
         // 里开的是哪个会话没有关系 —— 面板上正在写问题的那个会话就该看到它。
         const wanted = String(query.get('sessionId') ?? '')
@@ -928,6 +930,8 @@ async function handle(
         return send(res, 200, { ok: true, quote: best })
       }
       // 当前选中的论文。GET 给面板自检用，POST 由 Zotero 半边在选中变化时推上来。
+      // 当前论文的复现工作区自检（面板徽章 / 状态行读它）。
+      if (path === '/workspace-info') return send(res, 200, await workspaceInfo(deps, query))
       if (path === '/focus') return send(res, 200, { ok: true, focus: currentFocus() })
       // 前端轮询这个：有值就切过去，取走即清。
       if (path === '/pending-open') return send(res, 200, { ok: true, sessionId: takePendingOpen() })
@@ -1041,11 +1045,41 @@ async function handle(
       } catch {
         /* empty body ok */
       }
+      if (path === '/open-external') {
+        const urlToOpen = String(body.url ?? '').trim()
+        if (!urlToOpen || !/^https?:\/\//i.test(urlToOpen)) {
+          return send(res, 400, { ok: false, error: '非法或空的 URL' })
+        }
+        try {
+          const { spawn } = await import('node:child_process')
+          const cmd = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+          const args = process.platform === 'win32' ? ['/c', 'start', '', urlToOpen] : [urlToOpen]
+          spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+          return send(res, 200, { ok: true, url: urlToOpen })
+        } catch (err: any) {
+          return send(res, 500, { ok: false, error: String(err?.message ?? err) })
+        }
+      }
       if (path === '/inject-context') return send(res, 200, await injectContext(deps, body))
       // Zotero 集合树 → DSH 工作区（一对一镜像目录）
       if (path === '/collections/sync') return send(res, 200, await syncCollections(deps, body))
       // 单篇论文（有 PDF）→ 记录与复现用的工作区
       if (path === '/papers/workspace') return send(res, 200, await paperWorkspace(deps, body))
+      // 只设目标、不建目录：把"这篇论文的复现放哪"先定下来，目录等真要跑时再落地。
+      if (path === '/workspace-target') {
+        const ik = String(body.itemKey ?? '').trim()
+        if (!ik) return send(res, 200, { ok: false, error: '缺少 itemKey' })
+        const rec = setWorkspaceTarget({
+          itemKey: ik,
+          dir: String(body.dir ?? '').trim() || undefined,
+          remote: (body.remote as { host?: unknown; path?: unknown } | undefined)?.host
+            ? { host: String((body.remote as Record<string, unknown>).host), path: String((body.remote as Record<string, unknown>).path ?? '') }
+            : null,
+        })
+        return send(res, 200, { ok: true, target: rec ?? null })
+      }
+      // 只查不建：给前端徽章用，避免"看一眼就建出目录"。
+      if (path === '/workspace-info') return send(res, 200, await workspaceInfo(deps, new URLSearchParams(), body))
       if (path === '/papers/open-session') return send(res, 200, await openPaperSession(deps, body))
       // Idea 研究区：init / create / list
       if (path === '/ideas') return send(res, 200, await ideasZone(deps, body))
@@ -1418,7 +1452,8 @@ function defaultIdeasRoot(): string {
 /**
  * Idea 研究区：自己开的工作空间，不是 Zotero 集合的镜像。
  *
- * action: init 只建根与容器；create 在根下开一个想法目录并注册；list 列出已有的。
+ * action: init 只建根与容器；create 在根下开一个想法目录并注册；list 列出已有的；
+ *         path 只返回目标路径（侧栏的"添加一个 idea"走这条 —— 落地交给它的 createWorkspace）。
  */
 async function ideasZone(deps: PanelApiDeps, body: Record<string, unknown>) {
   const api = workspaceApiOf(deps)
@@ -1442,6 +1477,36 @@ async function ideasZone(deps: PanelApiDeps, body: Record<string, unknown>) {
     } catch (err: unknown) {
       return { error: String((err as Error)?.message ?? err) }
     }
+  }
+
+  // 只算路径、不落地：侧栏拿到 path 后走它自己的 createWorkspace，UI 才会当场反映出来。
+  // 若这里直接 adopt，host 建完了而前端 store 还没收到推送，用户会看到"点了没反应"。
+  if (action === 'path') {
+    const raw = String(body.name ?? '').trim()
+    if (!raw) return { ok: false, error: '需要 name' }
+    const s = safeSegment(raw)
+    if (!s) return { ok: false, error: '名字无法用作目录' }
+    const targetDir = join(root, s)
+    try {
+      mkdirSync(targetDir, { recursive: true })
+    } catch (err: unknown) {
+      return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
+    }
+    // 顺手在这个新的 idea 目录里预置一张干净的空白 canvas.excalidraw 画布
+    try {
+      const canvasFile = join(targetDir, 'canvas.excalidraw')
+      if (!existsSync(canvasFile)) {
+        writeFileSync(canvasFile, JSON.stringify({
+          type: 'excalidraw',
+          version: 2,
+          source: 'dsh-canvas',
+          elements: [],
+          appState: { gridSize: null, viewBackgroundColor: '#ffffff' },
+          files: {},
+        }, null, 2), 'utf8')
+      }
+    } catch { /* 预置画布失败不阻断目录使用 */ }
+    return { ok: true, root, name: raw, path: targetDir }
   }
 
   if (action === 'init') {
@@ -1512,38 +1577,184 @@ function mirrorDirs(
  * 两边各算一遍，迟早会在某个集合结构下分叉，然后就出现"工作区在这儿、
  * 会话在那儿"的错位。
  */
+/** 远程执行目标的解析结果。 */
+export interface RemoteTarget {
+  host: string
+  path: string
+}
+
+/** 显式工作区目标：覆盖自动落点规则。 */
+export interface WorkspaceTarget {
+  /** 显式本地目录（绝对路径）。给了就跳过后面的所有推导。来自 HTTP body，故为 unknown。 */
+  dir?: unknown
+  /** 远程目标。给了就按「同名锚点」在本地落点。来自 HTTP body，故为 unknown。 */
+  remote?: unknown
+}
+
+/** 宽松解析传入的 remote 字段；缺 host 或 path 一律当没给。 */
+function parseRemote(raw: unknown): RemoteTarget | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const host = String(o.host ?? '').trim()
+  const path = String(o.path ?? '').trim().replace(/\\/g, '/')
+  if (!host || !path) return undefined
+  return { host, path }
+}
+
+/**
+ * 远程工作区的本地锚点根目录。
+ *
+ * 锚点不是远端目录的镜像，只是 DSH 侧的一个真实目录 —— DSH 的工作区必须是
+ * 本地已存在的路径。真正的文件在远端，锚点里放脚本、笔记、拉回来的结果。
+ */
+function defaultRemoteRoot(): string {
+  const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
+  if (configured) return join(dirname(configured), '_remote')
+  return join(homedir(), 'zotero-remote')
+}
+
+/**
+ * 远端路径在本地锚点下的落点。
+ *
+ * 关键约定：**末段名与远端完全一致**。远端 /data/exp/jepa-lewm 对应本地
+ * <remoteRoot>/<host>/jepa-lewm —— 侧栏里看到的目录名，和 ssh 过去看到的
+ * 目录名是同一个词，不需要做任何心算映射。
+ */
+function remoteAnchorDir(target: RemoteTarget): string {
+  const tail = safeSegment(dirLabel(target.path)) || safeSegment(target.host) || 'remote'
+  return join(defaultRemoteRoot(), safeSegment(target.host) || 'remote', tail)
+}
+
+/**
+ * 当前论文的复现工作区自检。
+ *
+ * 面板徽章、Zotero 面板状态行、以及"这个工作区到底在哪"的自问都走这一条 ——
+ * 路径一律由 resolvePaperDir 现算，不缓存，所以换了落点规则不会出现"显示的是老路径"。
+ *
+ * 只读：dryRun=true，看一眼不会把目录建出来。
+ */
+async function workspaceInfo(deps: PanelApiDeps, query: URLSearchParams, body?: Record<string, unknown>) {
+  const itemKey = String(query.get('itemKey') ?? body?.itemKey ?? '').trim()
+  if (!itemKey) return { ok: false, error: '缺少 itemKey' }
+
+  // 目标优先级：本次请求显式给 > 论文上存过的 > 默认落点规则。
+  // 徽章走的是 GET（不带 body），所以它看到的是"这篇论文上次定在哪"，
+  // 而不是每次都重新按集合结构推一遍 —— 否则用户设的远程路径一刷新就丢。
+  const stored = getWorkspaceTarget(itemKey)
+  const effDir = body?.dir !== undefined ? body.dir : stored?.dir
+  const effRemote = body?.remote !== undefined ? body.remote : stored?.remote
+
+  const resolved = await resolvePaperDir(deps, itemKey, undefined, {
+    dir: effDir,
+    remote: effRemote,
+  }, true)
+  if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
+
+  const { dir, title, remote } = resolved
+  const exists = existsSync(dir)
+  const tail = dirLabel(dir)
+
+  // 归属的组：论文可能同时在多个组里，取第一个（面板显示的"当前上下文"）。
+  let groupName = ''
+  let groupId = ''
+  try {
+    const mems = membershipsOfPaper(itemKey)
+    if (mems.length > 0) {
+      groupId = mems[0].groupId
+      const g = resolveGroup({ groupId: mems[0].groupId })
+      groupName = g?.name ?? ''
+    }
+  } catch { /* 映射读不到不影响路径展示 */ }
+
+  const ssh = remote ? `ssh ${remote.host}` : ''
+  // 一行摘要：面板与徽章直接渲染它，两边不会各写一套拼接逻辑。
+  const label = remote
+    ? `${remote.host}:${remote.path}`
+    : `${dir}`
+
+  return {
+    ok: true,
+    itemKey,
+    title,
+    groupId,
+    groupName,
+    dir,
+    tail,
+    exists,
+    remote: remote ? { ...remote, ssh } : null,
+    label,
+  }
+}
+
+/**
+ * 工作区在 DSH 侧栏显示的名字。
+ *
+ * 侧栏宽度有限，塞不下完整路径，所以只把「能区分出这是哪个工作区」的信息带出来：
+ * 远程加 @host，显式路径加目录末段。完整路径由面板与徽章承担。
+ */
+function workspaceTitle(title: string, remote?: RemoteTarget, dir?: string): string {
+  const base = String(title || '').slice(0, 48) || '工作区'
+  if (remote) return `${base} @ ${remote.host}`
+  const tail = dir ? safeSegment(dirLabel(dir)) : ''
+  return tail ? `${base} · ${tail}`.slice(0, 70) : base
+}
+
 async function resolvePaperDir(
   deps: PanelApiDeps,
   itemKey: string,
   rootOverride?: unknown,
-): Promise<{ ok: true; dir: string; title: string; pdfTitle: string; itemKey: string } | { ok: false; error: string; title?: string }> {
+  target?: WorkspaceTarget,
+  dryRun = false,
+): Promise<{ ok: true; dir: string; title: string; pdfTitle: string; itemKey: string; remote?: RemoteTarget } | { ok: false; error: string; title?: string }> {
   const got = await deps.client.scoped().getItem(itemKey)
   if (!got.found || !got.item) return { ok: false, error: `条目不存在: ${itemKey}` }
   const it = got.item
   const pdf = (it.attachments ?? []).find((a) => a.isPdf)
   if (!pdf) return { ok: false, error: '这篇没有 PDF 附件，先加全文再建工作区', title: it.title || itemKey }
 
-  const root = String(rootOverride ?? '').trim() || defaultCollectionsRoot()
-  let parentDir = join(root, '_未分类')
-  try {
-    const col = await deps.client.collections()
-    const mirrored = mirrorDirs(root, col.tree)
-    const owned = (it.collections ?? []).map((k) => mirrored.dirs.get(k)).filter((d): d is string => Boolean(d))
-    if (owned.length) {
-      // 同一篇可能挂多个集合，取路径最短的那个当落点，避免在不相干的深处建目录。
-      owned.sort((a, b) => a.length - b.length)
-      parentDir = owned[0]
-    }
-  } catch { /* 集合读不到就用 _未分类 */ }
+  const explicitDir = String(target?.dir ?? '').trim()
+  const remote = parseRemote(target?.remote)
 
-  const seg = safeSegment(String(it.title || itemKey).slice(0, 70))
-  const dir = join(parentDir, seg || itemKey)
-  try {
-    mkdirSync(dir, { recursive: true })
-  } catch (err: unknown) {
-    return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
+  // 落点三选一，优先级从高到低：显式目录 > 远程锚点 > 集合镜像推导。
+  let dir: string
+  if (explicitDir) {
+    dir = explicitDir
+  } else if (remote) {
+    dir = remoteAnchorDir(remote)
+  } else {
+    const root = String(rootOverride ?? '').trim() || defaultCollectionsRoot()
+    let parentDir = join(root, '_未分类')
+    try {
+      const col = await deps.client.collections()
+      const mirrored = mirrorDirs(root, col.tree)
+      const owned = (it.collections ?? []).map((k) => mirrored.dirs.get(k)).filter((d): d is string => Boolean(d))
+      if (owned.length) {
+        // 同一篇可能挂多个集合，取路径最短的那个当落点，避免在不相干的深处建目录。
+        owned.sort((a, b) => a.length - b.length)
+        parentDir = owned[0]
+      }
+    } catch { /* 集合读不到就用 _未分类 */ }
+
+    const seg = safeSegment(String(it.title || itemKey).slice(0, 70))
+    dir = join(parentDir, seg || itemKey)
   }
-  return { ok: true, dir, title: String(it.title || itemKey), pdfTitle: pdf.title || pdf.filename || '', itemKey: String(it.key || itemKey) }
+
+  // dryRun：只算路径不落地。查询类调用（workspace-info）不该因为看一眼就建出目录。
+  if (!dryRun) {
+    try {
+      mkdirSync(dir, { recursive: true })
+    } catch (err: unknown) {
+      return { ok: false, error: '建目录失败：' + String((err as Error)?.message ?? err) }
+    }
+  }
+  return {
+    ok: true,
+    dir,
+    title: String(it.title || itemKey),
+    pdfTitle: pdf.title || pdf.filename || '',
+    itemKey: String(it.key || itemKey),
+    ...(remote ? { remote } : {}),
+  }
 }
 
 async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>) {
@@ -1552,18 +1763,33 @@ async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>)
   const api = workspaceApiOf(deps)
   if (!api?.create) return { ok: false, error: 'workspaceController 不可用' }
 
-  const resolved = await resolvePaperDir(deps, itemKey, body.root)
+  const resolved = await resolvePaperDir(deps, itemKey, body.root, { dir: body.dir, remote: body.remote })
   if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
-  const { dir, title, pdfTitle } = resolved
+  const { dir, title, pdfTitle, remote } = resolved
 
   try {
     const res = await api.create({ path: dir })
     const wsId = res?.workspace?.workspaceId
     if (typeof wsId !== 'string' || !wsId) return { ok: false, error: 'create 未返回 workspaceId' }
-    try { await api.rename?.({ workspaceId: wsId, title: title.slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
+    try { await api.rename?.({ workspaceId: wsId, title: workspaceTitle(title, remote, dir) }) } catch { /* 标题失败不阻断 */ }
     try { await api.insertBefore?.({ workspaceId: wsId }) } catch { /* 排序失败不阻断 */ }
-    console.log(`[dsh-zotero] papers/workspace ${itemKey} -> ${dir}`)
-    return { ok: true, itemKey, path: dir, workspaceId: wsId, created: Boolean(res?.created), pdf: pdfTitle }
+    // 记住这次的目标。徽章、以及下次 open-session，都读它 —— 否则用户设的
+    // 远程路径在下一次按默认规则重算时就被覆盖掉了。
+    try {
+      if (body.dir !== undefined || body.remote !== undefined) {
+        setWorkspaceTarget({
+          itemKey,
+          dir: String(body.dir ?? '').trim() || undefined,
+          remote: remote ?? null,
+        })
+      }
+    } catch { /* 目标持久化失败不阻断建工作区 */ }
+    console.log(`[dsh-zotero] papers/workspace ${itemKey} -> ${dir}${remote ? ` (remote ${remote.host}:${remote.path})` : ''}`)
+    return {
+      ok: true, itemKey, path: dir, workspaceId: wsId,
+      created: Boolean(res?.created), pdf: pdfTitle,
+      ...(remote ? { remote } : {}),
+    }
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
@@ -1585,9 +1811,9 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
   let itemKey = String(body.itemKey ?? '').trim()
   if (!itemKey) return { ok: false, error: '缺少 itemKey' }
 
-  const resolved = await resolvePaperDir(deps, itemKey, body.root)
+  const resolved = await resolvePaperDir(deps, itemKey, body.root, { dir: body.dir, remote: body.remote })
   if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
-  const { dir, title, itemKey: canonicalItemKey } = resolved
+  const { dir, title, itemKey: canonicalItemKey, remote } = resolved
   itemKey = canonicalItemKey
 
   // 工作区先落地：没有它，下面建出来的会话就没有归属，侧栏里会掉进「未分组」。
@@ -1600,7 +1826,7 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
       workspaceId = String(res?.workspace?.workspaceId ?? '')
       workspaceCreated = Boolean(res?.created)
       if (workspaceId) {
-        try { await api.rename?.({ workspaceId, title: title.slice(0, 60) }) } catch { /* 标题失败不阻断 */ }
+        try { await api.rename?.({ workspaceId, title: workspaceTitle(title, remote, dir) }) } catch { /* 标题失败不阻断 */ }
       }
     } catch (err: unknown) {
       console.log(`[dsh-zotero] open-session workspace ensure failed: ${String((err as Error)?.message ?? err)}`)

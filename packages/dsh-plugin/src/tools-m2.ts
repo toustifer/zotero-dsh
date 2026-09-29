@@ -24,6 +24,7 @@ import {
   writeCache,
 } from './mineru/cache.ts'
 import { fetchAttachmentPdf } from './zotero/pdf.ts'
+import { renderAttachmentPage } from './zotero/render.js'
 import type { ZoteroClient } from './zotero/client.ts'
 import { resolveModel, streamText } from './ml.ts'
 import type { ResolvedModel } from './ml.ts'
@@ -881,6 +882,92 @@ export function registerM2Tools(
       presentCall: (args) => ({
         card: 'generic',
         title: '跨篇综述',
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
+
+  /* ── zotero_render_page：渲染 PDF 页面为 PNG ────────────────────── */
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_render_page',
+      description:
+        'Render a PDF page from a Zotero attachment to PNG for vision-capable models. Use when text extraction (zotero_read_fulltext) cannot recover table numbers, figure details, or boxed formulas. Returns a file path; caller should use read_image to inspect it. Works offline (storage fallback) when Zotero Local API is unreachable.',
+      parameters: {
+        itemKey: { type: 'string', required: true, description: 'Zotero item key (paper).' },
+        attachmentKey: { type: 'string', description: 'Attachment key (defaults to itemKey when only one PDF).' },
+        page: { type: 'integer', required: true, description: '1-based PDF page number.' },
+        dpi: { type: 'integer', description: 'Render DPI (default 150, max 300).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            itemKey: { type: 'string', required: true },
+            attachmentKey: { type: 'string', required: true },
+            page: { type: 'integer', required: true },
+            file: { type: 'string', required: true },
+            width: { type: 'integer', required: true },
+            height: { type: 'integer', required: true },
+            bytes: { type: 'integer', required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 60_000,
+      execute: async (args, exec) => {
+        const a = args as { itemKey: string; attachmentKey?: string; page: number; dpi?: number }
+        try {
+          const cfg = currentConfig()
+          const dpi = Math.max(50, Math.min(a.dpi ?? 150, 300))
+          const rendered = await renderAttachmentPage(
+            client,
+            cfg,
+            a.itemKey,
+            a.attachmentKey,
+            a.page,
+            dpi,
+            exec?.signal,
+          )
+          return {
+            status: 'ok',
+            itemKey: a.itemKey,
+            attachmentKey: rendered.attachmentKey,
+            page: rendered.page,
+            file: rendered.file,
+            width: rendered.width,
+            height: rendered.height,
+            bytes: rendered.bytes,
+            error: '',
+            hint: 'Use read_image to inspect this rendered page.',
+          }
+        } catch (err: any) {
+          return {
+            status: 'error',
+            itemKey: a.itemKey,
+            attachmentKey: a.attachmentKey ?? '',
+            page: a.page,
+            file: '',
+            width: 0,
+            height: 0,
+            bytes: 0,
+            error: String(err?.message ?? err),
+            hint: err?.message?.includes('pdftoppm')
+              ? 'pdftoppm 不可用：需要安装 poppler-utils (Linux/macOS) 或 MiKTeX (Windows)。'
+              : '',
+          }
+        }
+      },
+      isConcurrencySafe: () => true,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `渲染 PDF 页面: p${(args as any).page}`,
         kind: 'other',
         rawInput: args,
       }),

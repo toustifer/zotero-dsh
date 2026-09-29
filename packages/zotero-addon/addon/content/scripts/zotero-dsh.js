@@ -975,6 +975,23 @@ var ZoteroDSH = {
     this.ensurePaperWorkspace(key, { silent: true });
   },
 
+  /**
+   * 把工作区落点画到面板的状态行上。
+   *
+   * 本地显示末段目录名、title 挂完整路径；远程显示 host:path —— 一眼能看出
+   * 这次复现跑在哪台机器上，不用再去翻配置文件。
+   */
+  paintPaperWorkspace(data) {
+    if (!this._paperWsState) return;
+    const remote = data && data.remote;
+    const full = remote
+      ? (remote.host + ":" + remote.path)
+      : String((data && data.path) || "");
+    const tail = full.split(/[\\/]/).filter(Boolean).slice(-1)[0] || "";
+    this._paperWsState.textContent = "工作区：" + (remote ? "🖥 " : "") + tail;
+    this._paperWsState.setAttribute("title", full + (data && data.exists === false ? "\n(目录尚未创建)" : ""));
+  },
+
   /** 请求 host 为某篇论文建工作区（有 PDF 才建得出来）。 */
   async ensurePaperWorkspace(key, opts) {
     const silent = !!(opts && opts.silent);
@@ -992,11 +1009,12 @@ var ZoteroDSH = {
       const ok = !!(data && data.ok);
       this.diag("paper ws " + key + " ok=" + ok + (data && data.error ? " err=" + data.error : "")
         + (data && data.created === false ? " (already)" : ""));
-      if (ok && data.created === false) return data;
       if (ok) {
-        const tail = String(data.path || "").split("\\").slice(-1)[0];
-        if (this._paperWsState) this._paperWsState.textContent = "工作区：" + tail;
-        if (!silent) this.notify("工作区已建好");
+        // 工作区可能早就建过了（created=false）。以前这条分支直接 return，
+        // 于是"已有工作区"永远不在面板上露面，用户只能靠记忆猜这篇论文的目录在哪。
+        // 现在每次都刷新状态行，并把完整路径挂到 title 上。
+        this.paintPaperWorkspace(data);
+        if (!silent && data.created !== false) this.notify("工作区已建好");
       } else if (!silent) {
         this.notify("建工作区失败：" + String((data && data.error) || ""));
         if (this._paperWsState) this._paperWsState.textContent = String((data && data.error) || "建失败");
