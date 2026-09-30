@@ -1735,12 +1735,88 @@ async function workspaceInfo(deps: PanelApiDeps, query: URLSearchParams, body?: 
  * 侧栏宽度有限，塞不下完整路径，所以只把「能区分出这是哪个工作区」的信息带出来：
  * 远程加 @host，显式路径加目录末段。完整路径由面板与徽章承担。
  */
-function workspaceTitle(title: string, remote?: RemoteTarget, dir?: string): string {
-  const base = String(title || '').slice(0, 48) || '工作区'
+function workspaceTitle(title: string, remote?: RemoteTarget, dir?: string, isExplicit = false): string {
+  const base = String(title || '').slice(0, 56) || '工作区'
   if (remote) return `${base} @ ${remote.host}`
-  const tail = dir ? safeSegment(dirLabel(dir)) : ''
-  return tail ? `${base} · ${tail}`.slice(0, 70) : base
+  // 只有在用户显式指定了外部目录（而非默认落点），且目录名不与论文标题重复时，才附加目录标签
+  if (isExplicit && dir) {
+    const tail = safeSegment(dirLabel(dir))
+    if (tail && !base.toLowerCase().includes(tail.toLowerCase()) && !tail.toLowerCase().includes(base.toLowerCase())) {
+      return `${base} · ${tail}`.slice(0, 70)
+    }
+  }
+  return base
 }
+
+/**
+ * 自动补全从 root 到 paperDir 之间的所有父集合工作区。
+ *
+ * 核心根治：用户在 Zotero 里新建了集合（如 3dworldmodel）或调整分类后，
+ * 未手动全量同步便直接对论文开会话/建工作区。若父集合 3dworldmodel 未在 DSH
+ * 注册为工作区，DSH 侧栏因找不到父节点会直接把论文脱壳挂在 Zotero 集合根目录下。
+ *
+ * 本函数自动把沿途缺失的所有祖先集合目录在 DSH 中注册为可折叠工作区，
+ * 并赋予其在 Zotero 中对应的真实集合名称，确保层级结构严丝合缝。
+ */
+async function ensureAncestorCollectionWorkspaces(
+  deps: PanelApiDeps,
+  paperDir: string,
+  root: string,
+): Promise<void> {
+  const api = workspaceApiOf(deps)
+  if (!api?.create) return
+
+  const norm = (s: string) => String(s).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const paperDirNorm = norm(paperDir)
+  const rootNorm = norm(root)
+  if (!paperDirNorm.startsWith(rootNorm + '/')) return
+
+  let colTree: Array<{ key: string; name: string; parentKey: string | null }> = []
+  try {
+    const col = await deps.client.collections()
+    colTree = col.tree
+  } catch {
+    return
+  }
+
+  const mirrored = mirrorDirs(root, colTree)
+  const nameOfPath = new Map<string, string>()
+  for (const [key, dirPath] of mirrored.dirs.entries()) {
+    const colItem = colTree.find((t) => t.key === key)
+    if (colItem && colItem.name) {
+      nameOfPath.set(norm(dirPath), colItem.name)
+    }
+  }
+
+  const all = await listHostWorkspaces(deps)
+  const existingPaths = new Set(all.map((w) => norm(w.path)))
+
+  const rootSegs = dirSegments(root)
+  const ancestors = ancestorDirs(paperDir, rootSegs)
+  // 排除最后一个（最后一段是论文自身目录）
+  const parentAncestors = ancestors.slice(0, -1)
+
+  for (const anc of parentAncestors) {
+    const ancNorm = norm(anc)
+    if (!existingPaths.has(ancNorm)) {
+      try {
+        mkdirSync(anc, { recursive: true })
+        const res = await api.create({ path: anc })
+        const wsId = res?.workspace?.workspaceId
+        if (typeof wsId === 'string' && wsId) {
+          existingPaths.add(ancNorm)
+          const title = nameOfPath.get(ancNorm) || dirLabel(anc)
+          try { await api.rename?.({ workspaceId: wsId, title }) } catch {}
+          try { await api.insertBefore?.({ workspaceId: wsId }) } catch {}
+          console.log(`[dsh-zotero] auto-ensured parent collection workspace: ${title} (${anc})`)
+        }
+      } catch (err: unknown) {
+        console.log(`[dsh-zotero] failed to auto-ensure ancestor workspace ${anc}: ${String((err as Error)?.message ?? err)}`)
+      }
+    }
+  }
+}
+
 
 async function resolvePaperDir(
   deps: PanelApiDeps,
@@ -1810,11 +1886,15 @@ async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>)
   if (!resolved.ok) return { ok: false, error: resolved.error, title: resolved.title }
   const { dir, title, pdfTitle, remote } = resolved
 
+  // 核心防御：自动补全祖先集合工作区，确保该论文在侧栏目录树中准确收纳在所属集合下，绝不裸露在外层
+  const collRoot = String(body.root ?? '').trim() || defaultCollectionsRoot()
+  await ensureAncestorCollectionWorkspaces(deps, dir, collRoot)
+
   try {
     const res = await api.create({ path: dir })
     const wsId = res?.workspace?.workspaceId
     if (typeof wsId !== 'string' || !wsId) return { ok: false, error: 'create 未返回 workspaceId' }
-    try { await api.rename?.({ workspaceId: wsId, title: workspaceTitle(title, remote, dir) }) } catch { /* 标题失败不阻断 */ }
+    try { await api.rename?.({ workspaceId: wsId, title: workspaceTitle(title, remote, dir, Boolean(body.dir)) }) } catch { /* 标题失败不阻断 */ }
     try { await api.insertBefore?.({ workspaceId: wsId }) } catch { /* 排序失败不阻断 */ }
     // 记住这次的目标。徽章、以及下次 open-session，都读它 —— 否则用户设的
     // 远程路径在下一次按默认规则重算时就被覆盖掉了。
@@ -1865,6 +1945,10 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
   const { dir, title, itemKey: canonicalItemKey, remote } = resolved
   itemKey = canonicalItemKey
 
+  // 核心防御：自动补全祖先集合工作区，确保该论文在侧栏目录树中准确收纳在所属集合下，绝不裸露在外层
+  const collRoot = String(body.root ?? '').trim() || defaultCollectionsRoot()
+  await ensureAncestorCollectionWorkspaces(deps, dir, collRoot)
+
   // 工作区先落地：没有它，下面建出来的会话就没有归属，侧栏里会掉进「未分组」。
   const api = workspaceApiOf(deps)
   let workspaceId = ''
@@ -1875,7 +1959,7 @@ async function openPaperSession(deps: PanelApiDeps, body: Record<string, unknown
       workspaceId = String(res?.workspace?.workspaceId ?? '')
       workspaceCreated = Boolean(res?.created)
       if (workspaceId) {
-        try { await api.rename?.({ workspaceId, title: workspaceTitle(title, remote, dir) }) } catch { /* 标题失败不阻断 */ }
+        try { await api.rename?.({ workspaceId, title: workspaceTitle(title, remote, dir, Boolean(body.dir)) }) } catch { /* 标题失败不阻断 */ }
       }
     } catch (err: unknown) {
       console.log(`[dsh-zotero] open-session workspace ensure failed: ${String((err as Error)?.message ?? err)}`)
