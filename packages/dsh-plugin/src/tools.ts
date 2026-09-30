@@ -10,6 +10,10 @@
  * 同 scope 工具重名（注册即抛错），本插件的 Local API 检索命名为
  * zotero_library_search，并在描述中区分语义检索。
  */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { remoteInstructionText, writeRemoteInstructions } from './panel-api.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ZoteroClient } from './zotero/client.ts'
 import type { Config } from './config.ts'
@@ -92,7 +96,176 @@ const itemSummarySchema = {
 } as const
 
 export function registerZoteroTools(ctx: { tools: { register(tool: unknown): void } }, client: ZoteroClient, config: Config): void {
-  /* ── zotero_health ─────────────────────────────────────────────────── */
+
+  /* ── 工作区远程目标：两段式，强制人工确认 ──────────────────────────── */
+
+  /*
+   * 为什么不给 UI 按钮：填远程目标是一句话的事（"我这摊活跑在 lab-gpu 的
+   * /data/exp/x 上"），对话比表单快；但写文件是有副作用的，所以拆成
+   * preview / apply 两段，用一次性 planId 把两段绑起来 —— apply 拿不到
+   * 有效 planId 就拒绝执行，模型没有办法一步跳过确认。
+   *
+   * 待确认的计划只存在内存里，5 分钟过期，且用掉即作废。
+   */
+  const pendingRemotePlans = new Map<
+    string,
+    { workspacePath: string; remote: { host: string; path: string } | null; at: number }
+  >()
+  const PLAN_TTL_MS = 5 * 60 * 1000
+
+  const prunePlans = (): void => {
+    const now = Date.now()
+    for (const [k, v] of pendingRemotePlans) {
+      if (now - v.at > PLAN_TTL_MS) pendingRemotePlans.delete(k)
+    }
+  }
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_workspace_remote_preview',
+      description:
+        'PREVIEW ONLY — writes nothing. Show what "set a remote execution target for this workspace" would write into the workspace, and mint a one-shot planId. ' +
+        'The remote target is a property of an EXISTING workspace: it records where that workspace\'s experiments actually run (which ssh host, which remote path). ' +
+        'It does NOT create a workspace, a directory, or any sidebar entry — the only side effect of applying it is one AGENTS.local.md inside the given directory, which DSH then feeds into every session rooted there. ' +
+        'WORKFLOW (mandatory): 1) call this tool; 2) show the user the returned content verbatim and ask them to confirm, using ask_user_question; ' +
+        '3) only after they agree, call zotero_workspace_remote_apply with the planId. Never apply without the user having seen the content. ' +
+        'Pass clear=true to preview REMOVING an existing target.',
+      parameters: {
+        workspacePath: {
+          type: 'string',
+          required: true,
+          description:
+            'Absolute local path of an existing workspace directory (e.g. D:\\...\\_ideas\\3d lewm). Must already exist — this tool never creates it.',
+        },
+        host: {
+          type: 'string',
+          description: 'ssh alias of the machine that runs the experiments, e.g. lab-gpu. Required unless clear=true.',
+        },
+        remotePath: {
+          type: 'string',
+          description: 'Absolute path on that machine, e.g. /data/exp/jepa-lewm. Required unless clear=true.',
+        },
+        clear: {
+          type: 'boolean',
+          description: 'Preview removing the remote target from this workspace instead of setting one.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean', required: true },
+            planId: { type: 'string', required: true },
+            file: { type: 'string', required: true },
+            action: { type: 'string', required: true },
+            content: { type: 'string', required: true },
+            error: { type: 'string', required: true },
+            nextStep: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      execute: async (args: {
+        workspacePath: string
+        host?: string
+        remotePath?: string
+        clear?: boolean
+      }) => {
+        prunePlans()
+        const wsPath = String(args.workspacePath ?? '').trim()
+        if (!wsPath) {
+          return { ok: false, planId: '', file: '', action: '', content: '', error: '缺少 workspacePath', nextStep: '' }
+        }
+        if (!existsSync(wsPath)) {
+          return {
+            ok: false, planId: '', file: '', action: '', content: '',
+            error: `工作区目录不存在：${wsPath}。这个工具只给已有工作区配远端，不会创建目录。`,
+            nextStep: '',
+          }
+        }
+        const clearing = args.clear === true
+        if (!clearing && (!args.host || !args.remotePath)) {
+          return {
+            ok: false, planId: '', file: '', action: '', content: '',
+            error: '需要同时给出 host 与 remotePath，或传 clear=true 表示清除',
+            nextStep: '',
+          }
+        }
+        const remote = clearing
+          ? null
+          : { host: String(args.host).trim(), path: String(args.remotePath).trim() }
+        const file = join(wsPath, 'AGENTS.local.md')
+        const content = remote ? remoteInstructionText(remote, wsPath) : '(将删除该文件)'
+        const planId = randomUUID()
+        pendingRemotePlans.set(planId, { workspacePath: wsPath, remote, at: Date.now() })
+        return {
+          ok: true,
+          planId,
+          file,
+          action: clearing ? 'clear' : 'set',
+          content,
+          error: '',
+          nextStep:
+            '把上面的 content 原样展示给用户，用 ask_user_question 取得明确同意后，再调用 zotero_workspace_remote_apply。',
+        }
+      },
+      isConcurrencySafe: () => true,
+      presentCall: () => ({ card: 'generic', title: '预览工作区远程目标', kind: 'other', rawInput: null }),
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_workspace_remote_apply',
+      description:
+        'Apply a previously previewed workspace remote-target change. Requires a planId from zotero_workspace_remote_preview. ' +
+        'Call this ONLY after the user has seen the previewed content and explicitly agreed to it. ' +
+        'The plan is single-use and expires after 5 minutes; an invalid or stale planId is rejected.',
+      parameters: {
+        planId: {
+          type: 'string',
+          required: true,
+          description: 'planId returned by zotero_workspace_remote_preview.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean', required: true },
+            file: { type: 'string', required: true },
+            action: { type: 'string', required: true },
+            error: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      execute: async (args: { planId: string }) => {
+        prunePlans()
+        const id = String(args.planId ?? '').trim()
+        const plan = pendingRemotePlans.get(id)
+        if (!plan) {
+          return {
+            ok: false, file: '', action: '',
+            error: '计划不存在或已过期（有效期 5 分钟，且只能用一次）。请重新调用 zotero_workspace_remote_preview。',
+          }
+        }
+        pendingRemotePlans.delete(id)   // 用掉即作废
+        try {
+          const file = writeRemoteInstructions(plan.workspacePath, plan.remote)
+          return { ok: true, file, action: plan.remote ? 'set' : 'clear', error: '' }
+        } catch (err: unknown) {
+          return { ok: false, file: '', action: '', error: String((err as Error)?.message ?? err) }
+        }
+      },
+      isConcurrencySafe: () => false,
+      presentCall: () => ({ card: 'generic', title: '应用工作区远程目标', kind: 'other', rawInput: null }),
+    }),
+  )
+
+    /* ── zotero_health ─────────────────────────────────────────────────── */
 
   ctx.tools.register(
     defineTool({

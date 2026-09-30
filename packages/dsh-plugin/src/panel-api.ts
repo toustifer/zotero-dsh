@@ -1630,7 +1630,7 @@ function parseRemote(raw: unknown): RemoteTarget | undefined {
  * 用 .local.md 后缀：远端主机名和路径是个人环境配置，通常不该进版本控制，
  * 而 AGENTS.local.md 正是为此预留的覆盖层。
  */
-function remoteInstructionText(target: RemoteTarget, workspacePath: string): string {
+export function remoteInstructionText(target: RemoteTarget, workspacePath: string): string {
   const name = dirLabel(target.path)
   return [
     '# 远程执行目标',
@@ -1657,7 +1657,7 @@ function remoteInstructionText(target: RemoteTarget, workspacePath: string): str
 }
 
 /** 写入/清除工作区的远程目标说明；返回实际落盘路径。 */
-function writeRemoteInstructions(workspacePath: string, target: RemoteTarget | null): string {
+export function writeRemoteInstructions(workspacePath: string, target: RemoteTarget | null): string {
   const file = join(workspacePath, 'AGENTS.local.md')
   if (!target) {
     try { if (existsSync(file)) rmSync(file, { force: true }) } catch { /* 删不掉就算了 */ }
