@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-zotero",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Zotero 库接入 DSH：Local API 检索/阅读/笔记 + MinerU 全文解析 + 右侧栏面板，源自 llm-for-zotero 重构 (AGPL-3.0)",
   "private": true,
   "type": "module",
