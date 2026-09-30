@@ -18,7 +18,7 @@
  *   POST /chat-send         发消息（冷会话自动恢复）
  *   GET  /chat-messages     文献会话消息缓存（host session/event 订阅累积）
  */
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -1078,6 +1078,24 @@ if (path === '/quote/latest') {
         })
         return send(res, 200, { ok: true, target: rec ?? null })
       }
+      // 给一个**已存在**的工作区配/清远程执行目标。
+      //
+      // 刻意按 path 操作而不是按论文：远程目标是"这摊活的算力在哪"，挂在
+      // 工作区上才是它本来的位置。不新建工作区、不建锚点目录、侧栏不会多
+      // 出任何东西 —— 只往那个目录写一份 AGENTS.local.md，之后该目录下每个
+      // 会话的提示词都会自动带上它。
+      if (path === '/workspace/remote') {
+        const wsPath = String(body.path ?? '').trim()
+        if (!wsPath) return send(res, 200, { ok: false, error: '缺少 path' })
+        const tgt = parseRemote(body.remote) ?? null
+        try {
+          const file = writeRemoteInstructions(wsPath, tgt)
+          console.log(`[dsh-zotero] workspace/remote ${wsPath} -> ${tgt ? tgt.host + ':' + tgt.path : '(cleared)'}`)
+          return send(res, 200, { ok: true, path: wsPath, file, remote: tgt })
+        } catch (err: unknown) {
+          return send(res, 200, { ok: false, error: String((err as Error)?.message ?? err) })
+        }
+      }
       // 只查不建：给前端徽章用，避免"看一眼就建出目录"。
       if (path === '/workspace-info') return send(res, 200, await workspaceInfo(deps, new URLSearchParams(), body))
       if (path === '/papers/open-session') return send(res, 200, await openPaperSession(deps, body))
@@ -1602,27 +1620,52 @@ function parseRemote(raw: unknown): RemoteTarget | undefined {
 }
 
 /**
- * 远程工作区的本地锚点根目录。
+ * 把「这个工作区的实验实际跑在哪」写进工作区自己的指令文件。
  *
- * 锚点不是远端目录的镜像，只是 DSH 侧的一个真实目录 —— DSH 的工作区必须是
- * 本地已存在的路径。真正的文件在远端，锚点里放脚本、笔记、拉回来的结果。
+ * 不建新工作区、不建锚点目录、不在侧栏多任何东西 —— DSH 的
+ * dsh-agent-instructions 会自动加载「项目根 → 会话工作目录」这一条链上的
+ * AGENTS.md / AGENTS.local.md，所以文件放进去，该目录下**每一个会话**的
+ * 提示词里就都会带上它，不需要任何按会话的注入代码。
+ *
+ * 用 .local.md 后缀：远端主机名和路径是个人环境配置，通常不该进版本控制，
+ * 而 AGENTS.local.md 正是为此预留的覆盖层。
  */
-function defaultRemoteRoot(): string {
-  const configured = String(currentConfig().zoteroWorkspaceRoot ?? '').trim()
-  if (configured) return join(dirname(configured), '_remote')
-  return join(homedir(), 'zotero-remote')
+function remoteInstructionText(target: RemoteTarget, workspacePath: string): string {
+  const name = dirLabel(target.path)
+  return [
+    '# 远程执行目标',
+    '',
+    `本工作区的实验代码与数据在远端机器上，**不在本地**。`,
+    '',
+    `- 远端主机：\`${target.host}\`（ssh 别名，\`ssh ${target.host}\` 可直接连）`,
+    `- 远端路径：\`${target.path}\``,
+    `- 本地目录：\`${workspacePath}\`（只放脚本、笔记、拉回来的结果）`,
+    '',
+    '## 怎么干活',
+    '',
+    '- 读写代码、跑训练、看日志 —— 都在远端。用 \`ssh ' + target.host + " '...'\` 下发命令。",
+    '- 目录命名保持一致：远端末段是 \`' + name + '\`，本地目录同名，对照时不用做心算映射。',
+    '- 长任务用 \`tmux\` 包一层，断线不丢进程；跑完把关键产出（日志、权重、图表）拉回本地留档。',
+    '- 需要大文件往返时用 \`rsync\`，不要用 \`scp -r\` 传整个目录。',
+    '',
+    '## 注意',
+    '',
+    '- 本地路径下的产物是**结论与记录**，不是实验现场。判断"实验有没有跑过"要看远端，不要看本地。',
+    '- 删除远端文件前先确认，那边通常没有版本控制兜底。',
+    '',
+  ].join('\n')
 }
 
-/**
- * 远端路径在本地锚点下的落点。
- *
- * 关键约定：**末段名与远端完全一致**。远端 /data/exp/jepa-lewm 对应本地
- * <remoteRoot>/<host>/jepa-lewm —— 侧栏里看到的目录名，和 ssh 过去看到的
- * 目录名是同一个词，不需要做任何心算映射。
- */
-function remoteAnchorDir(target: RemoteTarget): string {
-  const tail = safeSegment(dirLabel(target.path)) || safeSegment(target.host) || 'remote'
-  return join(defaultRemoteRoot(), safeSegment(target.host) || 'remote', tail)
+/** 写入/清除工作区的远程目标说明；返回实际落盘路径。 */
+function writeRemoteInstructions(workspacePath: string, target: RemoteTarget | null): string {
+  const file = join(workspacePath, 'AGENTS.local.md')
+  if (!target) {
+    try { if (existsSync(file)) rmSync(file, { force: true }) } catch { /* 删不掉就算了 */ }
+    return file
+  }
+  mkdirSync(workspacePath, { recursive: true })
+  writeFileSync(file, remoteInstructionText(target, workspacePath), 'utf8')
+  return file
 }
 
 /**
@@ -1715,12 +1758,12 @@ async function resolvePaperDir(
   const explicitDir = String(target?.dir ?? '').trim()
   const remote = parseRemote(target?.remote)
 
-  // 落点三选一，优先级从高到低：显式目录 > 远程锚点 > 集合镜像推导。
+  // 落点只看显式目录或集合镜像推导。remote 只是元数据，不参与决定目录 ——
+  // 它描述的是"这摊活的算力在哪"，而工作区目录本身就是记录与复现的落脚点，
+  // 两者是同一件事的两个面，不该因为配了远端就凭空多出一个目录。
   let dir: string
   if (explicitDir) {
     dir = explicitDir
-  } else if (remote) {
-    dir = remoteAnchorDir(remote)
   } else {
     const root = String(rootOverride ?? '').trim() || defaultCollectionsRoot()
     let parentDir = join(root, '_未分类')
@@ -1784,6 +1827,12 @@ async function paperWorkspace(deps: PanelApiDeps, body: Record<string, unknown>)
         })
       }
     } catch { /* 目标持久化失败不阻断建工作区 */ }
+
+    // 配了远端就顺手把说明写进工作区：dsh-agent-instructions 会把它带进
+    // 这个目录下每一个会话的提示词，不需要任何按会话的注入代码。
+    try {
+      if (remote) writeRemoteInstructions(dir, remote)
+    } catch { /* 写说明失败不该阻断建工作区 */ }
     console.log(`[dsh-zotero] papers/workspace ${itemKey} -> ${dir}${remote ? ` (remote ${remote.host}:${remote.path})` : ''}`)
     return {
       ok: true, itemKey, path: dir, workspaceId: wsId,
